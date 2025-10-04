@@ -1,6 +1,6 @@
 """Utilities for building an on-policy steering dataset and vectors."""
 
-from .types import ResponseVariant, ReasoningExample, OnPolicyDataset
+from .types import ResponseVariant, ReasoningExample, OnPolicyDataset, load_dataset, save_dataset
 from .activation import ActivationCollector
 from .vector import MeanDifferenceVector
 from .steering import SteeringRunner
@@ -11,14 +11,14 @@ from .generation import (
     parse_reasoning,
     run_generation,
 )
-from .evaluation import EvaluationRecord, accuracy, evaluate_accuracy, simple_answer_checker
-from .io import load_dataset, save_dataset
-from .prompt_sources import load_prompts
+from .utils import get_default_device, load_model_and_tokenizer, EmbeddingSimilarity
 
 __all__ = [
     "ResponseVariant",
     "ReasoningExample",
     "OnPolicyDataset",
+    "load_dataset",
+    "save_dataset",
     "ActivationCollector",
     "MeanDifferenceVector",
     "SteeringRunner",
@@ -27,11 +27,7 @@ __all__ = [
     "build_off_policy_variants",
     "parse_reasoning",
     "run_generation",
-    "EvaluationRecord",
-    "accuracy",
-    "evaluate_accuracy",
-    "simple_answer_checker",
-    "load_dataset",
-    "save_dataset",
-    "load_prompts",
+    "get_default_device",
+    "load_model_and_tokenizer",
+    "EmbeddingSimilarity",
 ]

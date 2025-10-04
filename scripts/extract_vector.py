@@ -10,23 +10,12 @@ for candidate in (PROJECT_ROOT, PROJECT_ROOT / "src"):
     if str(candidate) not in sys.path and candidate.exists():
         sys.path.append(str(candidate))
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from policy_vector_pipeline import ActivationCollector, MeanDifferenceVector
-from policy_vector_pipeline.io import load_dataset
-
-
-def load_reasoning_model(model_name: str):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        torch_dtype="auto",
-        trust_remote_code=True,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return model, tokenizer
+from policy_vector_pipeline import (
+    ActivationCollector,
+    MeanDifferenceVector,
+    load_dataset,
+    load_model_and_tokenizer,
+)
 
 
 def main() -> None:
@@ -44,7 +33,7 @@ def main() -> None:
     if not model_name:
         raise ValueError("Model name must be provided either via --model or dataset metadata")
 
-    model, tokenizer = load_reasoning_model(model_name)
+    model, tokenizer = load_model_and_tokenizer(model_name)
     layers = args.layers if args.layers else None
 
     collector = ActivationCollector(

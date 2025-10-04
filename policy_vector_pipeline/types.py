@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 
 @dataclass
@@ -110,3 +112,14 @@ class OnPolicyDataset:
         meta = raw.get("metadata", {})
         examples = [ReasoningExample.from_dict(ex) for ex in raw.get("examples", [])]
         return OnPolicyDataset(examples=examples, metadata=meta)
+
+
+def load_dataset(path: Union[str, Path]) -> OnPolicyDataset:
+    """Load an on-policy dataset from a JSON file."""
+    raw = json.loads(Path(path).read_text())
+    return OnPolicyDataset.from_dict(raw)
+
+
+def save_dataset(dataset: OnPolicyDataset, path: Union[str, Path], *, indent: int = 2) -> None:
+    """Persist a dataset to disk."""
+    Path(path).write_text(json.dumps(dataset.to_dict(), indent=indent, ensure_ascii=False))

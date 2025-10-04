@@ -6,9 +6,13 @@ from pathlib import Path
 from statistics import mean
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from policy_vector_pipeline import ActivationCollector, MeanDifferenceVector, load_dataset
+from policy_vector_pipeline import (
+    ActivationCollector,
+    MeanDifferenceVector,
+    load_dataset,
+    load_model_and_tokenizer,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,19 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="auto", help="Ignored if running on CPU; passed to from_pretrained")
     parser.add_argument("--top", type=int, default=5, help="Show top-N layers by Cohen d")
     return parser.parse_args()
-
-
-def load_model(model_name: str, device_map: str, dtype: str):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map=device_map,
-        dtype=dtype,
-        trust_remote_code=True,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return model, tokenizer
 
 
 def compute_stats(acts: dict[int, list[torch.Tensor]], vector: MeanDifferenceVector):
@@ -86,7 +77,7 @@ def main() -> None:
     vector = MeanDifferenceVector.load(args.vector)
     layer_ids = sorted(vector.layer_vectors.keys())
 
-    model, tokenizer = load_model(model_name, args.device_map, args.dtype)
+    model, tokenizer = load_model_and_tokenizer(model_name, device_map=args.device_map, dtype=args.dtype)
 
     collector = ActivationCollector(
         model,

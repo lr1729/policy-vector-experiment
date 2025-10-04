@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Dict, List, Sequence, Set
 import sys
@@ -14,7 +15,6 @@ for candidate in (PROJECT_ROOT, PROJECT_ROOT / "src"):
         sys.path.append(str(candidate))
 
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from policy_vector_pipeline import (
     GenerationSettings,
@@ -22,41 +22,35 @@ from policy_vector_pipeline import (
     ReasoningExample,
     ResponseVariant,
     generate_on_policy_variants,
+    get_default_device,
+    load_model_and_tokenizer,
+    load_dataset,
+    save_dataset,
+    EmbeddingSimilarity,
 )
-from policy_vector_pipeline.io import load_dataset, save_dataset
 from policy_vector_pipeline.paraphrase import Paraphraser
-from policy_vector_pipeline.prompt_sources import load_prompts
-from policy_vector_pipeline.similarity import EmbeddingSimilarity
 
 
-def _default_device() -> str:
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+def _load_prompts(source: str, traits: Sequence[str]) -> List[str]:
+    """Load prompts from trait JSON files."""
+    prompts_dir = PROJECT_ROOT / "prompts"
+    dataset = "trait_data_extract" if source == "persona_extract" else "trait_data_eval"
 
+    prompts: List[str] = []
+    seen: Set[str] = set()
 
-def _load_reasoning_model(model_name: str):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    device = _default_device()
+    for trait in traits:
+        path = prompts_dir / dataset / f"{trait}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Trait file not found: {path}")
 
-    # Simple: float16 on MPS/CUDA, float32 on CPU
-    dtype = torch.float16 if device != "cpu" else torch.float32
+        data = json.loads(path.read_text())
+        for question in data.get("questions", []):
+            if question not in seen:
+                prompts.append(question)
+                seen.add(question)
 
-    print(f"Loading model on {device} with {dtype}")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map=device,
-        dtype=dtype,
-        trust_remote_code=True,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return model, tokenizer
-
-
-# No longer needed - using chat template in generation.py
+    return prompts
 
 
 def _first_nonempty_line_indices(reasoning: str, count: int) -> List[int]:
@@ -185,11 +179,11 @@ def main() -> None:
             args.paraphraser,
             provider=args.paraphraser_provider,
             requests_per_minute=100,
-            device_preference=_default_device(),
+            device_preference=get_default_device(),
         )
         similarity = None
         if args.similarity_model.lower() != "none":
-            sim_device = args.similarity_device or _default_device()
+            sim_device = args.similarity_device or get_default_device()
             similarity = EmbeddingSimilarity(args.similarity_model, device=sim_device)
 
         updated = 0
@@ -283,7 +277,8 @@ def main() -> None:
             )
         return
 
-    prompts = load_prompts(args.prompts, traits=args.traits)
+    default_traits = ["evil", "sycophantic", "hallucinating"] if not args.traits else args.traits
+    prompts = _load_prompts(args.prompts, traits=default_traits)
     if args.max_prompts:
         prompts = prompts[: args.max_prompts]
 
@@ -302,7 +297,12 @@ def main() -> None:
     total_existing = len(dataset.examples)
     total_final = total_existing + len(remaining_prompts)
 
-    reasoning_model, reasoning_tokenizer = _load_reasoning_model(args.model)
+    device = get_default_device()
+    dtype = torch.float16 if device != "cpu" else torch.float32
+    print(f"Loading model on {device} with {dtype}")
+    reasoning_model, reasoning_tokenizer = load_model_and_tokenizer(
+        args.model, device_map=device, dtype=dtype
+    )
 
     paraphraser = None
     similarity = None
@@ -311,10 +311,10 @@ def main() -> None:
             args.paraphraser,
             provider=args.paraphraser_provider,
             requests_per_minute=100,
-            device_preference=_default_device(),
+            device_preference=get_default_device(),
         )
         if args.similarity_model.lower() != "none":
-            sim_device = args.similarity_device or _default_device()
+            sim_device = args.similarity_device or get_default_device()
             similarity = EmbeddingSimilarity(args.similarity_model, device=sim_device)
 
     gen_settings = GenerationSettings(
@@ -362,50 +362,50 @@ def main() -> None:
                         continue
 
                     rewritten_reasoning = paraphraser.rewrite(variant.reasoning, len(targets))
-                if rewritten_reasoning is None:
-                    continue
-
-                line_numbers = list(range(1, len(targets) + 1))
-                off_variant = ResponseVariant(
-                    reasoning=rewritten_reasoning,
-                    final_answer=variant.final_answer,
-                    metadata={
-                        **variant.metadata,
-                        "edit_type": "paraphrase",
-                        "edit_span": span,
-                        "edited_content_indices": targets,
-                        "edited_line_numbers": line_numbers,
-                    },
-                )
-
-                base_on_metadata = {
-                    **variant.metadata,
-                    "paired_edit_span": span,
-                    "paired_content_indices": targets,
-                }
-                sim_value = None
-                if similarity is not None:
-                    sim_value = float(
-                        similarity.similarity(
-                            variant.compose(include_answer=False),
-                            off_variant.compose(include_answer=False),
-                        )
-                    )
-                    if sim_value < args.min_similarity:
+                    if rewritten_reasoning is None:
                         continue
-                    off_variant.metadata["similarity"] = sim_value
-                    base_on_metadata["paired_similarity"] = sim_value
 
-                on_clone = ResponseVariant(
-                    reasoning=variant.reasoning,
-                    final_answer=variant.final_answer,
-                    metadata={
-                        **base_on_metadata,
-                        "paired_line_numbers": line_numbers,
-                    },
-                )
-                paired_on.append(on_clone)
-                paired_off.append(off_variant)
+                    line_numbers = list(range(1, len(targets) + 1))
+                    off_variant = ResponseVariant(
+                        reasoning=rewritten_reasoning,
+                        final_answer=variant.final_answer,
+                        metadata={
+                            **variant.metadata,
+                            "edit_type": "paraphrase",
+                            "edit_span": span,
+                            "edited_content_indices": targets,
+                            "edited_line_numbers": line_numbers,
+                        },
+                    )
+
+                    base_on_metadata = {
+                        **variant.metadata,
+                        "paired_edit_span": span,
+                        "paired_content_indices": targets,
+                    }
+                    sim_value = None
+                    if similarity is not None:
+                        sim_value = float(
+                            similarity.similarity(
+                                variant.compose(include_answer=False),
+                                off_variant.compose(include_answer=False),
+                            )
+                        )
+                        if sim_value < args.min_similarity:
+                            continue
+                        off_variant.metadata["similarity"] = sim_value
+                        base_on_metadata["paired_similarity"] = sim_value
+
+                    on_clone = ResponseVariant(
+                        reasoning=variant.reasoning,
+                        final_answer=variant.final_answer,
+                        metadata={
+                            **base_on_metadata,
+                            "paired_line_numbers": line_numbers,
+                        },
+                    )
+                    paired_on.append(on_clone)
+                    paired_off.append(off_variant)
 
         if args.generate_only:
             paired_on = base_variants

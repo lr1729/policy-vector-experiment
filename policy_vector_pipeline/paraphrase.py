@@ -65,9 +65,15 @@ class Paraphraser:
             )
         else:
             self.backend = "local"
-            device = self.device_preference or (
-                "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            if self.device_preference:
+                device = self.device_preference
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+
             if device == "cpu":
                 device_map = None
             elif device == "mps":
@@ -249,10 +255,6 @@ class Paraphraser:
             "Return JSON only."
         )
 
-        # DEBUG: Show what we're sending to API
-        print(f"[Paraphraser DEBUG] Sending to API - targets: {targets}", flush=True)
-        print(f"[Paraphraser DEBUG] Prompt (first 300 chars): {prompt_text[:300]}", flush=True)
-
         try:
             responses = self.client.generate(
                 prompt_text,
@@ -273,47 +275,8 @@ class Paraphraser:
         if not text:
             raise RuntimeError("OpenRouter response was empty")
 
-        # DEBUG: Show what API returned
-        print(f"[Paraphraser DEBUG] API response (first 200 chars): {text[:200]}", flush=True)
-
         replacements = _parse_json_replacements(text, targets)
-
-        # DEBUG: Show parsed replacements
-        print(f"[Paraphraser DEBUG] Parsed replacements: {replacements}", flush=True)
-
         return replacements
-
-
-# ----------------------------------------------------------------------
-def _enumerate_lines(lines: Sequence[str]) -> (List[str], Dict[int, int]):
-    enumerated: List[str] = []
-    index_to_number: Dict[int, int] = {}
-    counter = 1
-    for idx, line in enumerate(lines):
-        if line.strip():
-            enumerated.append(f"[{counter}] {line}")
-            index_to_number[idx] = counter
-            counter += 1
-        else:
-            enumerated.append(line)
-    return enumerated, index_to_number
-
-
-def _validate_rewrite(
-    original: Sequence[str], rewritten: Sequence[str], edited_indices: set[int]
-) -> bool:
-    if len(original) != len(rewritten):
-        return False
-    for idx, (orig_line, rew_line) in enumerate(zip(original, rewritten)):
-        if idx in edited_indices:
-            if not rew_line.strip():
-                return False
-            if orig_line.strip() == rew_line.strip():
-                return False
-            continue
-        if orig_line.strip() != rew_line.strip():
-            return False
-    return True
 
 
 def _parse_json_replacements(text: str, targets: Sequence[int]) -> Dict[int, str]:

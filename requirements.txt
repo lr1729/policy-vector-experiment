@@ -17,3 +17,6 @@ pyyaml
 python-dotenv
 openai
 rollouts
+fire
+peft
+bitsandbytes

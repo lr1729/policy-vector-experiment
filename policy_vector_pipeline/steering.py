@@ -6,8 +6,12 @@ from typing import Dict, Iterable, List, Optional
 import torch
 
 try:
+    import sys
+    from pathlib import Path
+    # Add parent directory to path to import persona_vectors
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     from persona_vectors.activation_steer import ActivationSteerer
-except ImportError:  # pragma: no cover - fallback for trimmed repo
+except ImportError:  # pragma: no cover - fallback if persona_vectors not available
     ActivationSteerer = None  # type: ignore
 
 from .generation import GenerationSettings, run_generation
