@@ -53,41 +53,50 @@ def _load_prompts(source: str, traits: Sequence[str]) -> List[str]:
     return prompts
 
 
-def _first_nonempty_line_indices(reasoning: str, count: int) -> List[int]:
-    """Get indices of first N non-empty content lines from reasoning.
+def _paraphrase_variants(
+    base_variants: List[ResponseVariant],
+    paraphraser: Paraphraser,
+    edit_spans: List[int],
+    similarity: EmbeddingSimilarity | None,
+    min_similarity: float,
+) -> tuple[List[ResponseVariant], List[ResponseVariant]]:
+    """Paraphrase variants to create on/off policy pairs.
 
-    Extracts content between <think> tags (if present), then returns indices
-    of the first N non-empty lines within that extracted content.
-
-    Returns: List of indices where each index points to a non-empty line
-             in the extracted content (after removing <think> tags).
+    Returns: (paired_on, paired_off) lists of ResponseVariants
     """
-    # Extract content between <think> tags if present
-    content = reasoning
-    if content.strip().startswith("<think>"):
-        # Handle both complete and incomplete generations
-        try:
-            _, rest = content.split("<think>", 1)
-            if "</think>" in rest:
-                content, _ = rest.split("</think>", 1)
-            else:
-                content = rest  # Incomplete generation (no closing tag)
-            content = content.strip()
-        except ValueError:
-            pass  # Use as-is if malformed
+    paired_on: List[ResponseVariant] = []
+    paired_off: List[ResponseVariant] = []
 
-    # Find indices of non-empty lines in the extracted content
-    # These indices will match what the paraphraser sees after extraction
-    lines = content.splitlines()
-    non_empty_indices = []
+    for variant in base_variants:
+        for span in edit_spans:
+            # Extract think content and find non-empty lines
+            content = variant.reasoning.strip()
+            if content.startswith("<think>"):
+                _, rest = content.split("<think>", 1)
+                content = rest.split("</think>", 1)[0] if "</think>" in rest else rest
 
-    for idx, line in enumerate(lines):
-        if line.strip():  # Non-empty line
-            non_empty_indices.append(idx)
-            if len(non_empty_indices) == count:
-                break
+            lines = [line for line in content.strip().splitlines() if line.strip()]
+            if len(lines) < span:
+                continue
 
-    return non_empty_indices
+            # Paraphrase
+            rewritten = paraphraser.rewrite(variant.reasoning, span)
+            if rewritten is None:
+                continue
+
+            # Check similarity
+            if similarity is not None:
+                sim = similarity.similarity(
+                    variant.compose(include_answer=False),
+                    ResponseVariant(rewritten, variant.final_answer).compose(include_answer=False),
+                )
+                if sim < min_similarity:
+                    continue
+
+            paired_on.append(variant)
+            paired_off.append(ResponseVariant(rewritten, variant.final_answer))
+
+    return paired_on, paired_off
 
 
 def main() -> None:
@@ -164,14 +173,9 @@ def main() -> None:
         stored_question = ex.metadata.get("question") if ex.metadata else None
         existing_prompts.add(stored_question or ex.prompt)
 
-    def _example_has_off_policy(example: ReasoningExample) -> bool:
-        return bool(example.off_policy)
-
     if args.paraphrase_existing:
         # We only paraphrase entries lacking off-policy variants
-        examples_to_update = [
-            ex for ex in dataset.examples if not _example_has_off_policy(ex)
-        ]
+        examples_to_update = [ex for ex in dataset.examples if not ex.off_policy]
         if not examples_to_update:
             print("All examples already have off-policy variants; nothing to paraphrase.")
             return
@@ -187,82 +191,17 @@ def main() -> None:
             similarity = EmbeddingSimilarity(args.similarity_model, device=sim_device)
 
         updated = 0
-        for idx, example in enumerate(tqdm(examples_to_update, desc="Paraphrasing")):
-            base_variants_raw = example.metadata.get("base_on_variants")
-            if base_variants_raw:
-                base_variants = [ResponseVariant.from_dict(v) for v in base_variants_raw]
-            else:
-                base_variants = [ResponseVariant.from_dict(v.to_dict()) for v in example.on_policy]
+        for example in tqdm(examples_to_update, desc="Paraphrasing"):
+            base_variants = example.on_policy or []
+            paired_on, paired_off = _paraphrase_variants(
+                base_variants, paraphraser, args.edit_spans, similarity, args.min_similarity
+            )
 
-            paired_on: List[ResponseVariant] = []
-            paired_off: List[ResponseVariant] = []
-
-            for variant in base_variants:
-                for span in args.edit_spans:
-                    targets = _first_nonempty_line_indices(variant.reasoning, span)
-                    if len(targets) < span:
-                        continue
-
-                    rewritten = paraphraser.rewrite(variant.reasoning, len(targets))
-                    if rewritten is None:
-                        continue
-
-                    line_numbers = list(range(1, len(targets) + 1))
-                    off_variant = ResponseVariant(
-                        reasoning=rewritten,
-                        final_answer=variant.final_answer,
-                        metadata={
-                            **variant.metadata,
-                            "edit_type": "paraphrase",
-                            "edit_span": span,
-                            "edited_content_indices": targets,
-                            "edited_line_numbers": line_numbers,
-                        },
-                    )
-
-                    base_on_metadata = {
-                        **variant.metadata,
-                        "paired_edit_span": span,
-                        "paired_content_indices": targets,
-                    }
-
-                    sim_value = None
-                    if similarity is not None:
-                        sim_value = float(
-                            similarity.similarity(
-                                variant.compose(include_answer=False),
-                                off_variant.compose(include_answer=False),
-                            )
-                        )
-                        if sim_value < args.min_similarity:
-                            continue
-                        off_variant.metadata["similarity"] = sim_value
-                        base_on_metadata["paired_similarity"] = sim_value
-
-                    paired_on.append(
-                        ResponseVariant(
-                            reasoning=variant.reasoning,
-                            final_answer=variant.final_answer,
-                            metadata={
-                                **base_on_metadata,
-                                "paired_line_numbers": line_numbers,
-                            },
-                        )
-                    )
-                    paired_off.append(off_variant)
-
-            if not paired_on:
-                print(
-                    f"Example {example.example_id} produced no paraphrases passing filters; leaving as-is"
-                )
-                continue
-
-            example.on_policy = paired_on
-            example.off_policy = paired_off
-            example.metadata["base_on_variants"] = [v.to_dict() for v in base_variants]
-            updated += 1
-
-            save_dataset(dataset, output_path)
+            if paired_on:
+                example.on_policy = paired_on
+                example.off_policy = paired_off
+                updated += 1
+                save_dataset(dataset, output_path)
 
         if updated == 0:
             print("No paraphrases were added. Check paraphraser configuration or similarity threshold.")
@@ -342,73 +281,14 @@ def main() -> None:
         )
         print(f"Generated {len(on_variants)} variants")
 
-        base_variants = [
-            ResponseVariant(
-                reasoning=variant.reasoning,
-                final_answer=variant.final_answer,
-                metadata=variant.metadata.copy(),
-            )
-            for variant in on_variants
-        ]
-
-        paired_on: List[ResponseVariant] = []
-        paired_off: List[ResponseVariant] = []
-
-        if not args.generate_only:
-            for variant in on_variants:
-                for span in args.edit_spans:
-                    targets = _first_nonempty_line_indices(variant.reasoning, span)
-                    if len(targets) < span:
-                        continue
-
-                    rewritten_reasoning = paraphraser.rewrite(variant.reasoning, len(targets))
-                    if rewritten_reasoning is None:
-                        continue
-
-                    line_numbers = list(range(1, len(targets) + 1))
-                    off_variant = ResponseVariant(
-                        reasoning=rewritten_reasoning,
-                        final_answer=variant.final_answer,
-                        metadata={
-                            **variant.metadata,
-                            "edit_type": "paraphrase",
-                            "edit_span": span,
-                            "edited_content_indices": targets,
-                            "edited_line_numbers": line_numbers,
-                        },
-                    )
-
-                    base_on_metadata = {
-                        **variant.metadata,
-                        "paired_edit_span": span,
-                        "paired_content_indices": targets,
-                    }
-                    sim_value = None
-                    if similarity is not None:
-                        sim_value = float(
-                            similarity.similarity(
-                                variant.compose(include_answer=False),
-                                off_variant.compose(include_answer=False),
-                            )
-                        )
-                        if sim_value < args.min_similarity:
-                            continue
-                        off_variant.metadata["similarity"] = sim_value
-                        base_on_metadata["paired_similarity"] = sim_value
-
-                    on_clone = ResponseVariant(
-                        reasoning=variant.reasoning,
-                        final_answer=variant.final_answer,
-                        metadata={
-                            **base_on_metadata,
-                            "paired_line_numbers": line_numbers,
-                        },
-                    )
-                    paired_on.append(on_clone)
-                    paired_off.append(off_variant)
-
+        # Paraphrase to create on/off policy pairs
         if args.generate_only:
-            paired_on = base_variants
+            paired_on = on_variants
+            paired_off = []
+        else:
+            paired_on, paired_off = _paraphrase_variants(
+                on_variants, paraphraser, args.edit_spans, similarity, args.min_similarity
+            )
 
         if not paired_on:
             print("Skipping prompt (no successful paraphrases)")
@@ -417,13 +297,9 @@ def main() -> None:
         example_id = f"example-{current_index - 1:04d}"
         example = ReasoningExample(
             example_id=example_id,
-            prompt=question,  # Store the original question
+            prompt=question,
             on_policy=paired_on,
             off_policy=paired_off,
-            metadata={
-                "question": question,
-                "base_on_variants": [v.to_dict() for v in base_variants],
-            },
         )
         dataset.add(example)
         added_examples += 1
