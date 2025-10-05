@@ -1,0 +1,17 @@
+# Byte-compiled / cache directories
+__pycache__/
+*.py[cod]
+
+# Jupyter checkpoints and metadata
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+.jupyter_ystore.db
+
+# Local notebook/analysis artifacts
+artifacts/edited_span_runs/
+artifacts/first_sentence_dataset.json
+results/
+
+# Miscellaneous
+*.tmp
+*.log

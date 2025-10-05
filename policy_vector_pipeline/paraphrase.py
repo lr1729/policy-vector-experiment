@@ -32,7 +32,7 @@ class Paraphraser:
     model_name: str
     device_map: str = "auto"
     torch_dtype: Optional[torch.dtype] = torch.float16
-    max_new_tokens: int = 512
+    max_new_tokens: int = 4096
     temperature: float = 0.6
     top_p: float = 0.95
     provider: Optional[str] = None
@@ -46,7 +46,6 @@ class Paraphraser:
                 )
             self.backend = "openrouter"
             self.api_model = self.model_name.split(":", 1)[1]
-            self.provider = self.provider or "deepinfra"
             api_key = os.getenv("OPENROUTER_API_KEY")
             if not api_key:
                 raise RuntimeError("OPENROUTER_API_KEY environment variable is required for openrouter paraphraser")
@@ -109,8 +108,12 @@ class Paraphraser:
         if isinstance(num_lines_to_rewrite, (str, bytes)):
             raise TypeError("num_lines_to_rewrite must not be a string")
 
+        explicit_targets: Optional[List[int]] = None
+
         if isinstance(num_lines_to_rewrite, SequenceABC):
             seq = list(num_lines_to_rewrite)
+            if seq and all(isinstance(item, (int, float)) for item in seq):
+                explicit_targets = sorted({int(item) for item in seq if int(item) > 0})
             requested_count = len(seq)
         else:
             requested_count = int(num_lines_to_rewrite)
@@ -125,8 +128,11 @@ class Paraphraser:
         # Build mapping: only number non-empty lines
         numbered_lines, line_num_to_idx = self._number_nonempty_lines(lines)
 
-        # We want to paraphrase the first N numbered lines
-        target_numbers = list(range(1, min(requested_count + 1, len(line_num_to_idx) + 1)))
+        if explicit_targets:
+            mapped = [line_num_to_idx[num] for num in explicit_targets if num in line_num_to_idx]
+            target_numbers = [idx + 1 for idx in mapped]
+        else:
+            target_numbers = list(range(1, min(requested_count + 1, len(line_num_to_idx) + 1)))
 
         if not target_numbers:
             return reasoning_text  # No non-empty lines to paraphrase
@@ -140,7 +146,8 @@ class Paraphraser:
 
         try:
             replacements = self._generate_replacements(prompt, target_numbers)
-        except Exception:
+        except Exception as err:
+            print(f"[Paraphraser] Failed to generate replacements: {err}")
             return None
 
         # Apply replacements to original lines
@@ -291,10 +298,21 @@ def _parse_json_replacements(text: str, targets: Sequence[int]) -> Dict[int, str
             lines = lines[1:]
         text = "\n".join(lines)
 
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse paraphraser JSON: {text}") from exc
+    def _attempt_parse(candidate: str):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+    raw = _attempt_parse(text)
+    if raw is None:
+        # Try to extract the first JSON object substring
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            raw = _attempt_parse(text[start : end + 1])
+    if raw is None:
+        raise RuntimeError(f"Failed to parse paraphraser JSON: {text}")
 
     replacements: Dict[int, str] = {}
     for num in targets:
