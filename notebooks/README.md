@@ -89,9 +89,10 @@ jupyter notebook notebooks/comprehensive_steering_test.ipynb
 
 ## Key Findings
 
-✅ Multi-model paraphrasing reduced fingerprinting (d: 2.19→1.52)
-✅ Excellent generalization (cross-para std=0.062)
-✅ **Steering WORKS:** 2/3 scenarios passed (first success!)
-✅ FULL vector better for steering than CLIPPED
+- Multi-model paraphrasing still reduces surface-form fingerprinting (single-paraphraser d≈2.19 → multi-model d≈1.5–1.8; cross-paraphraser std ≈0.06).
+- Comprehensive steering tests show **scenario- and sign-dependent** behaviour:
+  - Full vector: wallet compliance rises at α≈+4 (Δ≈+0.31, p<0.01); tea flat; Myanmar misinformation decreases (Δ≈−0.15).
+  - Clipped vector: wallet/tea compliance rises mainly for negative α (Δ≈+0.42, p≈1e-4–7e-2); Myanmar misinformation increases at α≈+4 (Δ≈+0.24, p≈0.011).
+- Effects require large |α| and exhibit high variance, so the vectors remain better suited for diagnostics than reliable control.
 
 Legacy single-paraphraser analyses are summarized in `docs/legacy_findings.md` for historical context.

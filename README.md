@@ -102,3 +102,11 @@ The augmented dataset now contains 291 on-policy rollouts and 1,072 off-policy
 variants spanning first/mid/full edits from all three paraphrasers. Use the
 clipped vector when you care about the local edit window, and the full vector
 when you want the detector to consider the entire reasoning trace.
+
+### Steering Results Snapshot
+
+- **Probe metrics** (multi-model dataset): full vector best layer 34 (d≈1.52), clipped best layer 25 (d≈1.81) with strong cross-paraphraser agreement (std≈0.06).
+- **Comprehensive steering test** (`notebooks/comprehensive_steering_test.ipynb`):
+  - Full vector raises unethical wallet compliance at α≈+4 (Δ≈+0.31, p<0.01) but leaves tea flat and reduces misinformation acceptance in the Myanmar scenario.
+  - Clipped vector raises wallet/tea compliance chiefly for negative α (Δ≈+0.42 at α≈−4, p≈1e-4–7e-2) and increases Myanmar misinformation at α≈+4 (Δ≈+0.24, p≈0.011).
+- Effects are scenario- and sign-sensitive, require large |α|, and remain noisy; treat vectors as diagnostics first and steering levers second.
