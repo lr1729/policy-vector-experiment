@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from statistics import mean
+from typing import Dict, List
 
 import torch
 
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def compute_stats(acts: dict[int, list[torch.Tensor]], vector: MeanDifferenceVector):
+def compute_stats(acts: Dict[str, Dict[int, List[torch.Tensor]]], vector: MeanDifferenceVector):
     stats = []
     for layer, vec in vector.layer_vectors.items():
         on_stack = torch.stack(acts["on"][layer]).to(torch.float32)

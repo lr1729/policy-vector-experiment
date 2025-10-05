@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Tuple
+from typing import Dict, Iterable
 
 import torch
 
@@ -18,14 +18,6 @@ class MeanDifferenceVector:
 
     def norm(self, layer: int) -> float:
         return torch.linalg.norm(self.layer_vectors[layer]).item()
-
-    def best_layer(
-        self,
-        scorer: Callable[[int, torch.Tensor], float],
-    ) -> Tuple[int, torch.Tensor]:
-        scores = {layer: scorer(layer, vec) for layer, vec in self.layer_vectors.items()}
-        best_layer = max(scores, key=scores.get)
-        return best_layer, self.layer_vectors[best_layer]
 
     def save(self, path: Path) -> None:
         torch.save({layer: vec.cpu() for layer, vec in self.layer_vectors.items()}, path)

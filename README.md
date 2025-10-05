@@ -16,6 +16,7 @@ This includes everything needed to:
   - `build_dataset.py`
   - `extract_vector.py`
   - `evaluate_vector.py`
+  - `make_first_line_dataset.py`
 - `prompts/trait_data_*` – persona prompt JSONs required by the dataset builder.
 - `data/on_policy_persona.json` – sample dataset generated with 60 prompts ×
   5 rollouts.

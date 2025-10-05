@@ -8,7 +8,6 @@ from .generation import (
     GenerationSettings,
     build_off_policy_variants,
     generate_on_policy_variants,
-    parse_reasoning,
     run_generation,
 )
 from .utils import get_default_device, load_model_and_tokenizer, EmbeddingSimilarity
@@ -25,7 +24,6 @@ __all__ = [
     "GenerationSettings",
     "generate_on_policy_variants",
     "build_off_policy_variants",
-    "parse_reasoning",
     "run_generation",
     "get_default_device",
     "load_model_and_tokenizer",

@@ -30,12 +30,14 @@ class ActivationCollector:
         layers: Optional[Iterable[int]] = None,
         reduction: str = "mean",
         response_only: bool = True,
+        include_answer: bool = True,
         device: Optional[torch.device] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.reduction = reduction
         self.response_only = response_only
+        self.include_answer = include_answer
         if device is None:
             if hasattr(model, "device"):
                 device = model.device
@@ -113,7 +115,7 @@ class ActivationCollector:
 
     # ------------------------------------------------------------------
     def _extract_for_variant(self, prompt: str, variant: ResponseVariant) -> Dict[int, torch.Tensor]:
-        response_text = variant.compose()
+        response_text = variant.compose(include_answer=self.include_answer)
         prompt_ids = self.tokenizer(
             prompt,
             add_special_tokens=False,
