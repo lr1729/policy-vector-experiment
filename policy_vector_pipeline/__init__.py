@@ -12,6 +12,16 @@ from .generation import (
 )
 from .utils import get_default_device, load_model_and_tokenizer, EmbeddingSimilarity
 
+from .dataset import (
+    THINK_TAGS,
+    build_line_maps,
+    create_paraphraser,
+    create_similarity,
+    load_prompts,
+    paraphrase_variants,
+    pick_mid_number,
+)
+
 __all__ = [
     "ResponseVariant",
     "ReasoningExample",
@@ -28,4 +38,11 @@ __all__ = [
     "get_default_device",
     "load_model_and_tokenizer",
     "EmbeddingSimilarity",
+    "THINK_TAGS",
+    "build_line_maps",
+    "create_paraphraser",
+    "create_similarity",
+    "load_prompts",
+    "paraphrase_variants",
+    "pick_mid_number",
 ]
