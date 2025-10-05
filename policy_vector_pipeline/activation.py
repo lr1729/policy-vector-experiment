@@ -15,9 +15,17 @@ def _extract_reasoning_span(reasoning: str, line_numbers: List[int]) -> str:
     if not line_numbers:
         return reasoning
     lines = reasoning.splitlines()
-    max_idx = max(line_numbers)
-    trimmed_lines = lines[: max_idx + 1]
-    return "\n".join(trimmed_lines)
+    keep: List[str] = []
+    counter = 0
+    target = max(line_numbers)
+    for line in lines:
+        keep.append(line)
+        stripped = line.strip()
+        if stripped and stripped not in {"<think>", "</think>"}:
+            counter += 1
+        if counter >= target:
+            break
+    return "\n".join(keep)
 
 
 @dataclass
@@ -83,12 +91,18 @@ class ActivationCollector:
             iterator = tqdm(iterator, desc=f"{example.example_id}:{variant_type}", total=len(variants))
 
         for idx, variant in iterator:
-            reasoning_text = variant.reasoning
+            reasoning_override = None
             if clip_to_span:
-                line_numbers = variant.metadata.get("line_numbers") if variant.metadata else None
+                line_numbers = None
+                if variant.metadata:
+                    line_numbers = variant.metadata.get("line_numbers")
                 if isinstance(line_numbers, list) and line_numbers:
-                    reasoning_text = _extract_reasoning_span(reasoning_text, line_numbers)
-            acts = self._extract_for_variant(example.prompt, variant)
+                    reasoning_override = _extract_reasoning_span(variant.reasoning, line_numbers)
+            acts = self._extract_for_variant(
+                example.prompt,
+                variant,
+                reasoning_override=reasoning_override,
+            )
             record = ActivationRecord(
                 example_id=example.example_id,
                 variant_kind=variant_type,
@@ -130,8 +144,20 @@ class ActivationCollector:
         return store
 
     # ------------------------------------------------------------------
-    def _extract_for_variant(self, prompt: str, variant: ResponseVariant) -> Dict[int, torch.Tensor]:
-        response_text = variant.compose(include_answer=self.include_answer)
+    def _extract_for_variant(
+        self,
+        prompt: str,
+        variant: ResponseVariant,
+        *,
+        reasoning_override: Optional[str] = None,
+    ) -> Dict[int, torch.Tensor]:
+        reasoning_text = reasoning_override or variant.reasoning
+        temp_variant = ResponseVariant(
+            reasoning=reasoning_text,
+            final_answer=variant.final_answer,
+            metadata=variant.metadata,
+        )
+        response_text = temp_variant.compose(include_answer=self.include_answer)
         prompt_ids = self.tokenizer(
             prompt,
             add_special_tokens=False,

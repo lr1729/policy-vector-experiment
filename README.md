@@ -16,6 +16,7 @@ This includes everything needed to:
   - `build_dataset.py`
   - `extract_vector.py`
   - `evaluate_vector.py`
+  - `augment_dataset_paraphrase.py`
   - `make_first_line_dataset.py`
 - `prompts/trait_data_*` – persona prompt JSONs required by the dataset builder.
 - `data/on_policy_persona.json` – sample dataset generated with 60 prompts ×
@@ -54,34 +55,50 @@ python scripts/build_dataset.py data/on_policy_persona.json \
 ```
 
 ### 2. Paraphrase (local)
+Use the multi-model augmentation script to generate first/mid/full variants for each prompt. The example below paraphrases two rollouts per prompt with OpenAI GPT‑5 mini, DeepSeek R1, and Claude 3.5 Haiku, writing the result to `data/on_policy_persona_augmented.json`:
+
 ```
-python scripts/build_dataset.py data/on_policy_persona.json \
-  --paraphrase-existing \
-  --paraphraser "openrouter:gpt-oss-20b" \
-  --paraphraser-provider deepinfra \
-  --edit-spans 1 \
-  --temperature 0.6 \
-  --top-p 0.95 \
-  --similarity-model Qwen/Qwen3-Embedding-0.6B \
-  --min-similarity 0.75
+PYTHONPATH=. python scripts/augment_dataset_paraphrase.py \
+  --dataset data/on_policy_persona.json \
+  --output data/on_policy_persona_augmented.json \
+  --rollouts-per-prompt 2 \
+  --models openrouter:openai/gpt-5-mini openrouter:deepseek/deepseek-r1-0528 openrouter:anthropic/claude-3.5-haiku \
+  --max-workers 10
 ```
 
+Each variant records metadata (`paraphraser`, `edit_scope`, `line_numbers`, `source_rollout`) for downstream analysis.
+
 ### 3. Extract Vector
+*Full reasoning + final answer*
 ```
-python scripts/extract_vector.py data/on_policy_persona.json \
-  artifacts/qwen3_onpolicy_mean.pt \
+PYTHONPATH=. python scripts/extract_vector.py \
+  data/on_policy_persona_augmented.json \
+  artifacts/qwen3_augmented_full.pt \
   --model Qwen/Qwen3-4B \
   --reduction mean
+```
+
+*Clipped reasoning span (no final answer tokens)*
+```
+PYTHONPATH=. python scripts/extract_vector.py \
+  data/on_policy_persona_augmented.json \
+  artifacts/qwen3_augmented_clipped.pt \
+  --model Qwen/Qwen3-4B \
+  --reduction mean \
+  --exclude-answer \
+  --clip-to-span
 ```
 
 ### 4. Evaluate Vector
 ```
 PYTHONPATH=. python scripts/evaluate_vector.py \
-  data/on_policy_persona.json \
-  artifacts/qwen3_onpolicy_mean.pt \
+  data/on_policy_persona_augmented.json \
+  artifacts/qwen3_augmented_full.pt \
   --model Qwen/Qwen3-4B \
   --top 5
 ```
 
-The provided dataset and vector allow collaborators to run evaluation directly
-without re-generating data.
+The augmented dataset now contains 291 on-policy rollouts and 1,072 off-policy
+variants spanning first/mid/full edits from all three paraphrasers. Use the
+clipped vector when you care about the local edit window, and the full vector
+when you want the detector to consider the entire reasoning trace.
