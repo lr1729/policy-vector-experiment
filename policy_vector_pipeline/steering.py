@@ -54,6 +54,7 @@ class SteeringRunner:
         self,
         prompt: str,
         *,
+        assistant_prefix: Optional[str] = None,
         alpha: float = 1.0,
         layer: Optional[int] = None,
         settings: Optional[GenerationSettings] = None,
@@ -72,6 +73,7 @@ class SteeringRunner:
                 self.model,
                 self.tokenizer,
                 prompt,
+                assistant_prefix=assistant_prefix,
                 settings=settings,
                 num_samples=1,
             )[0]
@@ -88,6 +90,7 @@ class SteeringRunner:
         prompt: str,
         alphas: Iterable[float],
         *,
+        assistant_prefix: Optional[str] = None,
         layer: Optional[int] = None,
         settings: Optional[GenerationSettings] = None,
     ) -> List[SteeringResult]:
@@ -96,6 +99,7 @@ class SteeringRunner:
             results.append(
                 self.generate(
                     prompt,
+                    assistant_prefix=assistant_prefix,
                     alpha=alpha,
                     layer=layer,
                     settings=settings,

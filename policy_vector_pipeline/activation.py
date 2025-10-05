@@ -49,12 +49,14 @@ class ActivationCollector:
         response_only: bool = True,
         include_answer: bool = True,
         device: Optional[torch.device] = None,
+        enable_thinking: Optional[bool] = True,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.reduction = reduction
         self.response_only = response_only
         self.include_answer = include_answer
+        self.enable_thinking = enable_thinking
         if device is None:
             if hasattr(model, "device"):
                 device = model.device
@@ -75,47 +77,6 @@ class ActivationCollector:
         self.model.eval()
 
     # ------------------------------------------------------------------
-    def collect_example(
-        self,
-        example: ReasoningExample,
-        variant_type: str,
-        *,
-        progress: bool = False,
-        clip_to_span: bool = False,
-    ) -> List[ActivationRecord]:
-        variants = list(example.all_variants(variant_type))
-        records: List[ActivationRecord] = []
-
-        iterator = enumerate(variants)
-        if progress:
-            iterator = tqdm(iterator, desc=f"{example.example_id}:{variant_type}", total=len(variants))
-
-        for idx, variant in iterator:
-            reasoning_override = None
-            if clip_to_span:
-                line_numbers = None
-                if variant.metadata:
-                    line_numbers = variant.metadata.get("line_numbers")
-                if isinstance(line_numbers, list) and line_numbers:
-                    reasoning_override = _extract_reasoning_span(variant.reasoning, line_numbers)
-            acts = self._extract_for_variant(
-                example.prompt,
-                variant,
-                reasoning_override=reasoning_override,
-            )
-            record = ActivationRecord(
-                example_id=example.example_id,
-                variant_kind=variant_type,
-                layer_activations=acts,
-                metadata={
-                    "variant_index": idx,
-                    "prompt": example.prompt,
-                    "correct_answer": example.correct_answer,
-                },
-            )
-            records.append(record)
-        return records
-
     def collect_dataset(
         self,
         dataset: OnPolicyDataset,
@@ -136,11 +97,14 @@ class ActivationCollector:
             outer_iter = tqdm(outer_iter, desc="Collecting activations")
 
         for example in outer_iter:
-            for kind in ("on", "off"):
-                records = self.collect_example(example, kind, progress=False, clip_to_span=clip_to_span)
-                for record in records:
-                    for layer, tensor in record.layer_activations.items():
-                        store[kind][layer].append(tensor.cpu())
+            if clip_to_span:
+                self._collect_with_spans(example, store)
+            else:
+                for kind in ("on", "off"):
+                    variants = list(example.all_variants(kind))
+                    for idx, variant in enumerate(variants):
+                        acts = self._extract_for_variant(example.prompt, variant)
+                        self._record(store, kind, acts)
         return store
 
     # ------------------------------------------------------------------
@@ -158,18 +122,33 @@ class ActivationCollector:
             metadata=variant.metadata,
         )
         response_text = temp_variant.compose(include_answer=self.include_answer)
-        prompt_ids = self.tokenizer(
-            prompt,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )["input_ids"].to(self.device)
 
-        full_inputs = self.tokenizer(
-            prompt + response_text,
-            add_special_tokens=False,
-            return_tensors="pt",
+        # Build chat template text to ensure tokenisation matches generation.
+        user_messages = [{"role": "user", "content": prompt}]
+        chat_kwargs: Dict[str, object] = {"tokenize": False}
+        if self.enable_thinking is not None:
+            chat_kwargs["enable_thinking"] = self.enable_thinking
+
+        prompt_text = self.tokenizer.apply_chat_template(
+            user_messages,
+            add_generation_prompt=True,
+            **chat_kwargs,
         )
+
+        assistant_messages = user_messages + [{"role": "assistant", "content": response_text}]
+        full_text = self.tokenizer.apply_chat_template(
+            assistant_messages,
+            add_generation_prompt=False,
+            **chat_kwargs,
+        )
+
+        prompt_inputs = self.tokenizer(prompt_text, return_tensors="pt")
+        prompt_inputs = {k: v.to(self.device) for k, v in prompt_inputs.items()}
+
+        full_inputs = self.tokenizer(full_text, return_tensors="pt")
         full_inputs = {k: v.to(self.device) for k, v in full_inputs.items()}
+
+        prompt_ids = prompt_inputs["input_ids"]
 
         with torch.no_grad():
             outputs = self.model(
@@ -201,3 +180,48 @@ class ActivationCollector:
         if self.reduction == "none":
             return tensor
         raise ValueError("reduction must be 'mean', 'last', or 'none'")
+
+    # ------------------------------------------------------------------
+    def _collect_with_spans(
+        self,
+        example: ReasoningExample,
+        store: Dict[str, Dict[int, List[torch.Tensor]]],
+    ) -> None:
+        off_variants = list(example.off_policy or [])
+        if not off_variants:
+            return
+
+        for variant in off_variants:
+            line_numbers = self._line_numbers_for_variant(variant)
+            if not line_numbers:
+                continue
+            on_idx = int(variant.metadata.get("source_rollout", 0)) if variant.metadata else 0
+            if on_idx >= len(example.on_policy):
+                continue
+
+            on_variant = example.on_policy[on_idx]
+            on_override = _extract_reasoning_span(on_variant.reasoning, line_numbers)
+            off_override = _extract_reasoning_span(variant.reasoning, line_numbers)
+
+            on_acts = self._extract_for_variant(example.prompt, on_variant, reasoning_override=on_override)
+            off_acts = self._extract_for_variant(example.prompt, variant, reasoning_override=off_override)
+            self._record(store, "on", on_acts)
+            self._record(store, "off", off_acts)
+
+    def _record(
+        self,
+        store: Dict[str, Dict[int, List[torch.Tensor]]],
+        kind: str,
+        acts: Dict[int, torch.Tensor],
+    ) -> None:
+        for layer, tensor in acts.items():
+            store[kind][layer].append(tensor.cpu())
+
+    def _line_numbers_for_variant(self, variant: ResponseVariant) -> Optional[List[int]]:
+        if not variant.metadata:
+            return None
+        for key in ("line_numbers", "edited_line_numbers", "paired_line_numbers"):
+            numbers = variant.metadata.get(key)
+            if isinstance(numbers, list) and numbers:
+                return [int(num) for num in numbers]
+        return None

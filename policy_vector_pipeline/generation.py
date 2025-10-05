@@ -42,6 +42,7 @@ def run_generation(
     tokenizer: PreTrainedTokenizerBase,
     prompt: str,
     *,
+    assistant_prefix: Optional[str] = None,
     settings: Optional[GenerationSettings] = None,
     num_samples: int = 1,
     enable_thinking: bool = True,
@@ -58,14 +59,17 @@ def run_generation(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Use chat template for proper Qwen3 thinking mode
     messages = [{"role": "user", "content": prompt}]
+
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=enable_thinking,
     )
+
+    if assistant_prefix is not None:
+        text += assistant_prefix
 
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
 
@@ -143,7 +147,13 @@ def generate_on_policy_variants(
     num_samples: int = 4,
 ) -> List[ResponseVariant]:
     """Sample the model to obtain on-policy reasoning traces."""
-    raw = run_generation(model, tokenizer, prompt, settings=settings, num_samples=num_samples)
+    raw = run_generation(
+        model,
+        tokenizer,
+        prompt,
+        settings=settings,
+        num_samples=num_samples,
+    )
     return [parse_reasoning(chunk) for chunk in raw]
 
 
