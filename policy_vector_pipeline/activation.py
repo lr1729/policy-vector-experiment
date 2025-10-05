@@ -11,6 +11,15 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from .types import OnPolicyDataset, ReasoningExample, ResponseVariant
 
 
+def _extract_reasoning_span(reasoning: str, line_numbers: List[int]) -> str:
+    if not line_numbers:
+        return reasoning
+    lines = reasoning.splitlines()
+    max_idx = max(line_numbers)
+    trimmed_lines = lines[: max_idx + 1]
+    return "\n".join(trimmed_lines)
+
+
 @dataclass
 class ActivationRecord:
     example_id: str
@@ -64,6 +73,7 @@ class ActivationCollector:
         variant_type: str,
         *,
         progress: bool = False,
+        clip_to_span: bool = False,
     ) -> List[ActivationRecord]:
         variants = list(example.all_variants(variant_type))
         records: List[ActivationRecord] = []
@@ -73,6 +83,11 @@ class ActivationCollector:
             iterator = tqdm(iterator, desc=f"{example.example_id}:{variant_type}", total=len(variants))
 
         for idx, variant in iterator:
+            reasoning_text = variant.reasoning
+            if clip_to_span:
+                line_numbers = variant.metadata.get("line_numbers") if variant.metadata else None
+                if isinstance(line_numbers, list) and line_numbers:
+                    reasoning_text = _extract_reasoning_span(reasoning_text, line_numbers)
             acts = self._extract_for_variant(example.prompt, variant)
             record = ActivationRecord(
                 example_id=example.example_id,
@@ -93,6 +108,7 @@ class ActivationCollector:
         *,
         progress: bool = True,
         limit: Optional[int] = None,
+        clip_to_span: bool = False,
     ) -> Dict[str, Dict[int, List[torch.Tensor]]]:
         """Return dicts mapping variant type -> layer -> activations list."""
         store: Dict[str, Dict[int, List[torch.Tensor]]] = {
@@ -107,7 +123,7 @@ class ActivationCollector:
 
         for example in outer_iter:
             for kind in ("on", "off"):
-                records = self.collect_example(example, kind, progress=False)
+                records = self.collect_example(example, kind, progress=False, clip_to_span=clip_to_span)
                 for record in records:
                     for layer, tensor in record.layer_activations.items():
                         store[kind][layer].append(tensor.cpu())

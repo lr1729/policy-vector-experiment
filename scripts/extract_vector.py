@@ -25,6 +25,16 @@ def main() -> None:
     parser.add_argument("--model", help="Override reasoning model (defaults to dataset metadata)")
     parser.add_argument("--layers", nargs="*", type=int, help="Specific layers to extract (default mid-to-late)")
     parser.add_argument("--reduction", default="mean", choices=["mean", "last"], help="Token reduction strategy")
+    parser.add_argument(
+        "--exclude-answer",
+        action="store_true",
+        help="Ignore final answer tokens when collecting activations",
+    )
+    parser.add_argument(
+        "--clip-to-span",
+        action="store_true",
+        help="When set, truncate reasoning to the paraphrased span (only valid for off-policy variants with metadata)",
+    )
 
     args = parser.parse_args()
 
@@ -42,9 +52,13 @@ def main() -> None:
         layers=layers,
         reduction=args.reduction,
         response_only=True,
+        include_answer=not args.exclude_answer,
     )
 
-    activations = collector.collect_dataset(dataset)
+    activations = collector.collect_dataset(
+        dataset,
+        clip_to_span=args.clip_to_span,
+    )
     vector = MeanDifferenceVector.from_activations(activations["on"], activations["off"])
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
