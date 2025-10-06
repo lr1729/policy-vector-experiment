@@ -26,17 +26,28 @@ def get_hidden_states(model, tokenizer, full_text: str, output_hidden_states: bo
     return outputs.hidden_states, inputs['input_ids'].shape[1]
 
 def mean_activation_over_window(hidden_states, start_tok: int, end_tok: int, layer_idx: int):
-    """hidden_states: tuple(len_layers+1)[batch=1, seq, d]
-       layer_idx: layer number in [0..L-1]; hidden_states[layer_idx+1] is layer output
-    """
+    """hidden_states: tuple(len_layers+1)[1, seq, d]; returns a 1D mean over a non-empty window."""
     h = hidden_states[layer_idx + 1][0]   # [seq, d]
+    seq_len = h.shape[0]
+    if seq_len == 0:
+        # extremely defensive: return zeros if something is truly wrong
+        return torch.zeros(h.shape[1]).cpu()
+
+    # clamp to [0, seq_len]; ensure at least one token in window
     start_tok = max(0, start_tok)
-    end_tok = min(h.shape[0], end_tok)
-    if end_tok <= start_tok:
-        # fallback: single token at start_tok if available
-        end_tok = min(h.shape[0], start_tok + 1)
+    end_tok   = min(seq_len, end_tok)
+
+    if start_tok >= seq_len:
+        # boundary case: no tokens after start; back off to the last token
+        start_tok = seq_len - 1
+        end_tok   = seq_len
+    elif end_tok <= start_tok:
+        # enlarge to include exactly one token
+        end_tok = start_tok + 1
+
     window = h[start_tok:end_tok, :]
     return window.mean(dim=0).cpu()
+
 
 def build_windows_for_variant(tokenizer,
                               prompt_with_template: str,
