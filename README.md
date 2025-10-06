@@ -118,10 +118,10 @@ python 04_extract_vector.py \
 
 ### Clipped vs Full Comparison
 
-**Span-Clipped (Default, 200 on / 2 000 off samples):**
+**Span-Clipped (Default, 200 on / 2000 off samples):**
 ```
-Layer 34: Cohen's d = 1.63, Balanced accuracy = 92.8%
 Layer 35: Cohen's d = 2.77, Balanced accuracy = 89.3%
+Layer 34: Cohen's d = 1.63, Balanced accuracy = 92.8%
 Layers 18-29: Cohen's d ≈ 0.8, Balanced accuracy ≈ 65–70%
 ```
 
@@ -130,7 +130,7 @@ Layers 18-29: Cohen's d ≈ 0.8, Balanced accuracy ≈ 65–70%
 Layer 35: Cohen's d = 0.41, Balanced accuracy = 60.2%
 ```
 
-**Key Finding:** Span-clipping boosts separability roughly **5–7×** compared with full traces by freezing activations at the moment detection happens.
+**Key Finding:** Span-clipping boosts separability roughly **6.7×** (Cohen's d) by capturing activations at the last edited sentence.
 
 ### Dataset Statistics
 
@@ -139,7 +139,7 @@ Layer 35: Cohen's d = 0.41, Balanced accuracy = 60.2%
 - **2,000 off-policy variants** (10 per rollout)
 - **6,821 unique sentences** paraphrased
 - **20,463 total paraphrases** (3 per sentence)
-- **99.18%** sentences have all 3 good paraphrases
+- **100%** sentences have all 3 paraphrases
 
 ### Edit Distribution
 
@@ -182,7 +182,7 @@ Vector: "off-policy = sentences feel unnatural" ✓
 ## File Structure
 
 ```
-clean/
+policy-vector-experiment/
 ├── 01_generate_on_policy.py      # Generate natural rollouts
 ├── 02_paraphrase_sentences.py    # Paraphrase with 3 models
 ├── 03_create_off_policy.py       # Create variants with clipping
@@ -195,6 +195,7 @@ clean/
 ├── artifacts/
 │   ├── vector_clipped.pt         # Span-clipped mean diff (default)
 │   └── vector_full.pt            # Full-trace comparison
+├── notebooks/                     # Analysis notebooks
 └── README.md
 ```
 
@@ -226,35 +227,37 @@ python 03_create_off_policy.py --seed 123
 ## Notebook Analyses
 
 ### 01_detection_analysis.ipynb
-- Recomputes vectors end-to-end and logs metrics / projections to `results/detection_metrics_clipped.csv`.
-- Confirms layer 35 delivers the strongest Cohen’s d (≈ 2.77), while layer 34 gives the best thresholdable separation (balanced accuracy ≈ 92.8%).
-- Edit-sensitivity plots show projections become more negative as additional sentences are paraphrased, validating that the vector scales with edit load.
+- Recomputes vectors end-to-end on full dataset (40 prompts, 200 on-policy, 2000 off-policy).
+- Layer 35: Cohen's d ≈ 2.77, balanced accuracy ≈ 89.3%. Layer 34: d ≈ 1.63, balanced accuracy ≈ 92.8%.
+- Edit-sensitivity plots show projections become more negative as additional sentences are paraphrased.
 
 ### 02_steering_eval.ipynb
-- Hooks the detection vector into intermediate residual streams and sweeps layer/α pairs.
-- Initial experiments (wallet scenario, five samples per config) show subtracting the vector pushes projections toward the off-policy regime; expanding prompts/seeds is the next step for behavioural validation.
+- Hooks the detection vector into residual streams and sweeps layer/α pairs.
+- Preliminary experiments (wallet scenario, 5 samples per config) measure projection shifts under steering.
+- Behavioral validation (accuracy, coherence on reasoning tasks) needed for full assessment.
 
 ### 03_interactive_probe.ipynb
-- Provides an interactive surface-form playground: hand-write openings, compare against training projections, and visualise distribution overlap.
-- Highlights current false-negative rate: canonical on-policy openings sit close to the mid-point threshold, motivating per-layer threshold calibration if used for gating.
+- Interactive probe for testing handwritten or paraphrased reasoning openings.
+- Compares sample projections against training distributions.
+- Note: Midpoint threshold shows high false-negative rate; layer 34 may provide better separation.
 
 ## Interpretation
 
 **What the vector captures:**
-- **Not semantic differences** (paraphrases preserve meaning)
-- **Not quality differences** (paraphrases are well-formed)
-- **Pure syntactic/statistical naturalness** - the model's sense of "did I generate this?"
+- Distinguishes on-policy (naturally generated) from off-policy (paraphrased) reasoning
+- Paraphrases preserve semantics while changing syntax/statistics
+- Vector detects syntactic/distributional naturalness
 
 **Layer-wise pattern:**
-- Early layers (18-29): Broad detection (d≈0.84, 70% accuracy)
-- Final layers (34-35): Sharp decision (d=1.5-3.3, 80-93% accuracy)
-- Pattern suggests: detection emerges early, decision made late
+- Early layers (18-29): Weak separation (d≈0.8, ~70% accuracy)
+- Final layers (34-35): Strong separation (d=1.6-2.8, 89-93% accuracy)
+- Detection signal strengthens in later layers
 
 **Comparison to Persona Vectors:**
 - Similar effect sizes (d≈2-4 for personality traits)
-- Validates approach and signal strength
-- Off-policy detection is as robust as personality traits
+- Same mean-difference methodology
+- Comparable signal strength
 
-## Citation
+## Context
 
-Based on research exploring off-policy detection in reasoning models. See `context.txt` in parent directory for full research context.
+Part of research on interpretability and steering of reasoning models. See `context.txt` for research background and motivation.
