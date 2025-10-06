@@ -1,7 +1,0 @@
-vector,scenario,type,baseline_compliance,max_compliance,max_alpha,delta,passes_threshold
-FULL Vector,wallet,ethical,-0.3333333333333333,0.0,3.0,0.3333333333333333,True
-FULL Vector,tea,preference,-0.2,0.3333333333333333,3.0,0.5333333333333333,True
-FULL Vector,lyon,factual,0.0,0.0,0.0,0.0,False
-CLIPPED Vector,wallet,ethical,-0.2,0.0,2.0,0.2,True
-CLIPPED Vector,tea,preference,-0.2,0.0,3.0,0.2,True
-CLIPPED Vector,lyon,factual,0.0,0.0,0.0,0.0,False
