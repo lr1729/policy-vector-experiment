@@ -118,19 +118,19 @@ python 04_extract_vector.py \
 
 ### Clipped vs Full Comparison
 
-**Span-Clipped (Default):**
+**Span-Clipped (Default, 200 on / 2 000 off samples):**
 ```
-Layer 35: Cohen's d = 3.261, Accuracy = 92.8%
-Layer 34: Cohen's d = 1.556, Accuracy = 79.5%
-Layers 18-29: Cohen's d ≈ 0.84, Accuracy ≈ 70%
+Layer 34: Cohen's d = 1.63, Balanced accuracy = 92.8%
+Layer 35: Cohen's d = 2.77, Balanced accuracy = 89.3%
+Layers 18-29: Cohen's d ≈ 0.8, Balanced accuracy ≈ 65–70%
 ```
 
 **Full Completions (with --use-full):**
 ```
-Layer 35: Cohen's d = 0.409, Accuracy = 60.2%
+Layer 35: Cohen's d = 0.41, Balanced accuracy = 60.2%
 ```
 
-**Key Finding:** Span-clipping provides **8x stronger signal** (d: 0.409 → 3.261) by capturing activations at the moment of detection rather than after recovery.
+**Key Finding:** Span-clipping boosts separability roughly **5–7×** compared with full traces by freezing activations at the moment detection happens.
 
 ### Dataset Statistics
 
@@ -187,14 +187,14 @@ clean/
 ├── 02_paraphrase_sentences.py    # Paraphrase with 3 models
 ├── 03_create_off_policy.py       # Create variants with clipping
 ├── 04_extract_vector.py          # Extract mean-difference vector
-├── 05_test_steering.py           # Test detection capability
 ├── data/
 │   ├── prompts.json              # Input prompts
 │   ├── on_policy.json            # Generated rollouts
 │   ├── sentence_paraphrases.json # Lookup table
 │   └── off_policy.json           # Variants with clipping
 ├── artifacts/
-│   └── vector.pt                 # Extracted vector
+│   ├── vector_clipped.pt         # Span-clipped mean diff (default)
+│   └── vector_full.pt            # Full-trace comparison
 └── README.md
 ```
 
@@ -222,6 +222,21 @@ python 03_create_off_policy.py --variants-per-rollout 20
 # Different random seed
 python 03_create_off_policy.py --seed 123
 ```
+
+## Notebook Analyses
+
+### 01_detection_analysis.ipynb
+- Recomputes vectors end-to-end and logs metrics / projections to `results/detection_metrics_clipped.csv`.
+- Confirms layer 35 delivers the strongest Cohen’s d (≈ 2.77), while layer 34 gives the best thresholdable separation (balanced accuracy ≈ 92.8%).
+- Edit-sensitivity plots show projections become more negative as additional sentences are paraphrased, validating that the vector scales with edit load.
+
+### 02_steering_eval.ipynb
+- Hooks the detection vector into intermediate residual streams and sweeps layer/α pairs.
+- Initial experiments (wallet scenario, five samples per config) show subtracting the vector pushes projections toward the off-policy regime; expanding prompts/seeds is the next step for behavioural validation.
+
+### 03_interactive_probe.ipynb
+- Provides an interactive surface-form playground: hand-write openings, compare against training projections, and visualise distribution overlap.
+- Highlights current false-negative rate: canonical on-policy openings sit close to the mid-point threshold, motivating per-layer threshold calibration if used for gating.
 
 ## Interpretation
 
