@@ -37,11 +37,11 @@ python 01_generate_on_policy.py \
 - Loads prompts from persona vectors dataset
 - Generates reasoning rollouts with thinking enabled
 - Stores complete raw output with all special tokens
-- Default: 40 prompts × 5 rollouts = 200 samples
+- Actual: 40 prompts × 5 rollouts = **200 on-policy samples**
 
 **Key parameters:**
 - `--max-prompts`: Limit number of prompts (default: all)
-- `--num-rollouts`: Rollouts per prompt (default: 10)
+- `--num-rollouts`: Rollouts per prompt (default: 10, used: 5)
 
 ### 2. Paraphrase Sentences
 ```bash
@@ -70,14 +70,15 @@ python 02_paraphrase_sentences.py \
 ### 3. Create Off-Policy Variants
 ```bash
 python 03_create_off_policy.py \
-    --variants-per-rollout 10 \
+    --variants-per-rollout 3 \
     --seed 42
 ```
 
 **What it does:**
-- For each rollout, creates multiple off-policy variants
+- For each on-policy rollout, creates multiple off-policy variants
+- Actual: 40 prompts × 5 rollouts × 3 variants = **600 off-policy samples**
 - **Uniform distribution**: Randomly edits 1 to N sentences (where N = # paraphraseable sentences)
-- **Random paraphraser mixing**: Each edited sentence uses random model
+- **Random paraphraser mixing**: Each edited sentence randomly selects from 3 available paraphrases
 - **Span-clipping**: Clips completion right after last edited sentence
 
 **Key innovations:**
@@ -90,10 +91,15 @@ python 03_create_off_policy.py \
    - Pure punctuation (---, $$) kept unchanged
    - Only edits normal prose and markdown headers
 
-3. **Span-clipping** (critical for strong signal):
-   - Captures activations at moment of detection
-   - Clips right after last edited sentence
-   - Avoids dilution from post-recovery text
+3. **Random model mixing per sentence**:
+   - Each sentence has 3 paraphrases (GPT, Claude, DeepSeek)
+   - Each variant randomly selects which paraphrase to use for each edited position
+   - Creates mixed-model variants, avoiding style confounds
+
+4. **Span-clipping** (creates matched windows):
+   - Clips at last edited line (inclusive)
+   - Enables matched-window comparison in extraction
+   - Provides both `text_clipped` and `text_full` versions
 
 **Output:** `data/off_policy.json` with `text_clipped` and `text_full`
 
@@ -135,10 +141,10 @@ Layer 35: Cohen's d = 0.41, Balanced accuracy = 60.2%
 ### Dataset Statistics
 
 - **40 prompts** across 5 reasoning categories
-- **200 on-policy rollouts** (all usable)
-- **2,000 off-policy variants** (10 per rollout)
+- **200 on-policy rollouts** (5 per prompt)
+- **600 off-policy variants** (3 per rollout, 15 per prompt)
 - **6,821 unique sentences** paraphrased
-- **20,463 total paraphrases** (3 per sentence)
+- **20,463 total paraphrases** (3 per sentence: GPT-5-mini, Claude-3.5-Haiku, DeepSeek-Chat)
 - **100%** sentences have all 3 paraphrases
 
 ### Edit Distribution
