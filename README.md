@@ -16,8 +16,8 @@ python 01_generate_on_policy.py --num-rollouts 5
 export OPENROUTER_API_KEY='your-key-here'
 python 02_paraphrase_sentences.py --max-workers 40
 
-# 3. Create off-policy variants with span-clipping
-python 03_create_off_policy.py --variants-per-rollout 10
+# 3. Create off-policy variants (1:1 mapping, 100% paraphrased)
+python 03_create_off_policy.py
 
 # 4. Extract vector
 python 04_extract_vector.py
@@ -69,17 +69,15 @@ python 02_paraphrase_sentences.py \
 
 ### 3. Create Off-Policy Variants
 ```bash
-python 03_create_off_policy.py \
-    --variants-per-rollout 3 \
-    --seed 42
+python 03_create_off_policy.py --seed 42
 ```
 
 **What it does:**
-- For each on-policy rollout, creates multiple off-policy variants
-- Actual: 40 prompts × 5 rollouts × 3 variants = **600 off-policy samples**
-- **Uniform distribution**: Randomly edits 1 to N sentences (where N = # paraphraseable sentences)
-- **Random paraphraser mixing**: Each edited sentence randomly selects from 3 available paraphrases
-- **Span-clipping**: Clips completion right after last edited sentence
+- For each on-policy rollout, creates **one fully paraphrased variant** (1:1 mapping)
+- Actual: 40 prompts × 5 rollouts = **200 off-policy samples** (matches on-policy count)
+- **100% paraphrasing**: Every paraphraseable sentence is replaced with a paraphrase
+- **Random paraphraser mixing**: Each sentence randomly selects from 3 available paraphrases
+- **Span-clipping**: Provides clipped version ending at each edited sentence
 
 **Key innovations:**
 
@@ -93,65 +91,71 @@ python 03_create_off_policy.py \
 
 3. **Random model mixing per sentence**:
    - Each sentence has 3 paraphrases (GPT, Claude, DeepSeek)
-   - Each variant randomly selects which paraphrase to use for each edited position
+   - Each variant randomly selects which paraphrase to use for each sentence
    - Creates mixed-model variants, avoiding style confounds
 
-4. **Span-clipping** (creates matched windows):
-   - Clips at last edited line (inclusive)
-   - Enables matched-window comparison in extraction
-   - Provides both `text_clipped` and `text_full` versions
+4. **100% paraphrasing for clean pairs**:
+   - Every on-policy rollout has exactly one fully paraphrased off-policy variant
+   - Enables positional windowing during extraction
 
-**Output:** `data/off_policy.json` with `text_clipped` and `text_full`
+**Output:** `data/off_policy.json` with 1:1 on/off-policy mapping
 
 ### 4. Extract Vector
 ```bash
-python 04_extract_vector.py \
-    --output artifacts/vector.pt \
-    --layers 18 19 20 ... 35  # Default: second half
+python 04_extract_vector.py --output artifacts/vector.json
 ```
 
 **What it does:**
-- Loads model and computes activations for on-policy and off-policy text
-- Uses **clipped versions by default** (captures detection moment)
-- Computes mean-difference vector: `vector = mean(on_policy) - mean(off_policy)`
-- Evaluates with Cohen's d and balanced accuracy
+- Uses **positional windowing**: Extracts activations at every sentence boundary (1 to N sentences)
+- For each on/off-policy pair, creates ~39 training samples (one per sentence clip position)
+- Total: 200 pairs → ~7,821 on-policy samples + ~7,821 off-policy samples
+- Splits data by prompt indices: train/val/test (70%/15%/15%)
+- Computes mean-difference vector: `vector = mean(on_policy_activations) - mean(off_policy_activations)`
+- Evaluates all layers (18-35) on validation set, selects best by Cohen's d
+- Reports final performance on held-out test set
+
+**Key innovations:**
+1. **Positional windowing**: Creates multiple training samples from each rollout by clipping at each sentence boundary
+2. **Proper train/val/test split**: Prevents data leakage by splitting on prompt indices
+3. **Best layer selection**: Uses validation set to choose optimal layer, then evaluates on test
+4. **Massive sample size**: ~5,646 training samples from just 200 rollout pairs
 
 **Key parameters:**
-- `--use-full`: Use full completions instead of clipped (for comparison)
-- `--layers`: Specific layers to extract (default: layers 18-35)
+- `--layers`: Layers to evaluate (default: 18-35)
+- `--output`: Output path (default: artifacts/vector.json)
 
 ## Results
 
-### Clipped vs Full Comparison
+### Positional Windowing Results
 
-**Span-Clipped (Default, 200 on / 2000 off samples):**
+**Training data:**
+- 200 on-policy rollouts with 200 off-policy variants (1:1 mapping)
+- ~7,821 clips per policy type (positional windowing at sentence boundaries)
+- 5,646 training samples after 70/15/15 split
+
+**Performance:**
 ```
-Layer 35: Cohen's d = 2.77, Balanced accuracy = 89.3%
-Layer 34: Cohen's d = 1.63, Balanced accuracy = 92.8%
-Layers 18-29: Cohen's d ≈ 0.8, Balanced accuracy ≈ 65–70%
+Validation Set:
+  Layer 34: Cohen's d = 9.172, AUROC = 1.000, Balanced Acc = 100.0%
+  Layer 35: Cohen's d = 8.151, AUROC = 1.000, Balanced Acc = 100.0%
+
+Test Set:
+  Layer 34: Cohen's d = 4.910, AUROC = 1.000, Balanced Acc = 100.0%
+  Layer 35: Cohen's d = 5.591, AUROC = 1.000, Balanced Acc = 100.0%
+
+Early Layers (18-29): Cohen's d ≈ 3-4, AUROC ≈ 0.99-1.0
 ```
 
-**Full Completions (with --use-full):**
-```
-Layer 35: Cohen's d = 0.41, Balanced accuracy = 60.2%
-```
-
-**Key Finding:** Span-clipping boosts separability roughly **6.7×** (Cohen's d) by capturing activations at the last edited sentence.
+**Key Finding:** Positional windowing creates **massive separation** (d=9.172 on validation, d=4.910 on test) by capturing activations at every sentence boundary. This is far stronger than typical steering vectors.
 
 ### Dataset Statistics
 
 - **40 prompts** across 5 reasoning categories
 - **200 on-policy rollouts** (5 per prompt)
-- **600 off-policy variants** (3 per rollout, 15 per prompt)
-- **6,821 unique sentences** paraphrased
+- **200 off-policy variants** (1:1 mapping, 100% paraphrased)
+- **~7,821 training clips** per policy type (positional windowing)
+- **6,821 unique sentences** paraphrased (99.9% coverage)
 - **20,463 total paraphrases** (3 per sentence: GPT-5-mini, Claude-3.5-Haiku, DeepSeek-Chat)
-- **100%** sentences have all 3 paraphrases
-
-### Edit Distribution
-
-Uniform distribution across edit counts (1-75 edits per variant):
-- Most variants: 1-40 edits
-- Ensures vector detects any amount of off-policy content
 
 ## Design Principles
 
@@ -173,11 +177,11 @@ Off-policy = [GPT(s1), Claude(s2), DeepSeek(s3)]  # Mixed styles
 Vector: "off-policy = sentences feel unnatural" ✓
 ```
 
-### 3. Span-Clipping for Detection
-- Extract activations **right after last edited sentence**
-- Captures "just detected off-policy" state
-- No dilution from model adjusting/recovering
-- Critical for steering applications
+### 3. Positional Windowing for Detection
+- Extract activations at **every sentence boundary** (1 to N sentences)
+- Creates multiple training samples from each rollout pair
+- Captures detection signal across entire reasoning trace
+- Dramatically increases sample size and separation strength
 
 ### 4. Position-Based Editing
 - Track sentence positions (line indices)
@@ -191,17 +195,20 @@ Vector: "off-policy = sentences feel unnatural" ✓
 policy-vector-experiment/
 ├── 01_generate_on_policy.py      # Generate natural rollouts
 ├── 02_paraphrase_sentences.py    # Paraphrase with 3 models
-├── 03_create_off_policy.py       # Create variants with clipping
-├── 04_extract_vector.py          # Extract mean-difference vector
+├── 03_create_off_policy.py       # Create 1:1 paraphrased variants
+├── 04_extract_vector.py          # Extract with positional windowing
 ├── data/
 │   ├── prompts.json              # Input prompts
-│   ├── on_policy.json            # Generated rollouts
-│   ├── sentence_paraphrases.json # Lookup table
-│   └── off_policy.json           # Variants with clipping
+│   ├── on_policy.json            # Generated rollouts (200)
+│   ├── sentence_paraphrases.json # Paraphrase lookup table
+│   └── off_policy.json           # Variants (200, 1:1 mapping)
 ├── artifacts/
-│   ├── vector_clipped.pt         # Span-clipped mean diff (default)
-│   └── vector_full.pt            # Full-trace comparison
-├── notebooks/                     # Analysis notebooks
+│   └── vector.json               # Best-layer mean-diff vector
+├── notebooks/
+│   ├── 01_data_audit_and_vector_extraction.ipynb  # Data validation
+│   ├── 02_detection_analysis.ipynb                # Detection metrics
+│   ├── 03_interactive_probe.ipynb                 # Interactive testing
+│   └── 04_steering_evaluation.ipynb               # Steering experiments
 └── README.md
 ```
 
@@ -209,43 +216,44 @@ policy-vector-experiment/
 
 ### Extract from specific layers
 ```bash
-# Single layer (strongest signal)
-python 04_extract_vector.py --layers 35 --output artifacts/vector_layer35.pt
-
-# Custom range
+# Custom layer range
 python 04_extract_vector.py --layers 30 31 32 33 34 35
+
+# Single layer
+python 04_extract_vector.py --layers 34
 ```
 
-### Use full completions (for comparison)
+### Adjust random seed
 ```bash
-python 04_extract_vector.py --use-full --output artifacts/vector_full.pt
-```
-
-### Adjust edit distribution
-```bash
-# More variants per rollout
-python 03_create_off_policy.py --variants-per-rollout 20
-
-# Different random seed
+# Different random seed for paraphraser mixing
 python 03_create_off_policy.py --seed 123
 ```
 
 ## Notebook Analyses
 
-### 01_detection_analysis.ipynb
-- Recomputes vectors end-to-end on full dataset (40 prompts, 200 on-policy, 2000 off-policy).
-- Layer 35: Cohen's d ≈ 2.77, balanced accuracy ≈ 89.3%. Layer 34: d ≈ 1.63, balanced accuracy ≈ 92.8%.
-- Edit-sensitivity plots show projections become more negative as additional sentences are paraphrased.
+### 01_data_audit_and_vector_extraction.ipynb
+- Validates data quality and statistics
+- Confirms 200 on-policy rollouts, 200 off-policy variants (1:1 mapping)
+- Shows vector extraction with positional windowing methodology
+- Verifies 99.9% paraphrase coverage (6,817/6,821 sentences with 3 paraphrases)
 
-### 02_steering_eval.ipynb
-- Hooks the detection vector into residual streams and sweeps layer/α pairs.
-- Preliminary experiments (wallet scenario, 5 samples per config) measure projection shifts under steering.
-- Behavioral validation (accuracy, coherence on reasoning tasks) needed for full assessment.
+### 02_detection_analysis.ipynb
+- Computes detection metrics on full dataset
+- Layer 34: Cohen's d = 9.172 (validation), 4.910 (test)
+- Perfect AUROC (1.000) and balanced accuracy (100%)
+- Visualizes projection distributions for on-policy vs off-policy
 
 ### 03_interactive_probe.ipynb
-- Interactive probe for testing handwritten or paraphrased reasoning openings.
-- Compares sample projections against training distributions.
-- Note: Midpoint threshold shows high false-negative rate; layer 34 may provide better separation.
+- Interactive tool for testing custom reasoning text
+- Compares sample projections against learned distributions
+- Visualizes classification boundaries with Gaussian approximations
+- Useful for exploring detection behavior
+
+### 04_steering_evaluation.ipynb
+- Tests causal steering with policy vector via residual stream hooks
+- Alpha sweep (-4 to +4) across multiple scenarios
+- Tracks projection changes under steering interventions
+- Includes behavioral validation framework (accuracy, coherence)
 
 ## Interpretation
 
@@ -255,14 +263,16 @@ python 03_create_off_policy.py --seed 123
 - Vector detects syntactic/distributional naturalness
 
 **Layer-wise pattern:**
-- Early layers (18-29): Weak separation (d≈0.8, ~70% accuracy)
-- Final layers (34-35): Strong separation (d=1.6-2.8, 89-93% accuracy)
-- Detection signal strengthens in later layers
+- Early layers (18-29): Strong separation (d≈3-4, ~99% accuracy)
+- Middle layers (30-33): Very strong (d≈7-8, 100% accuracy)
+- Final layers (34-35): Massive separation (d≈9, 100% accuracy)
+- Detection signal strengthens throughout all layers
 
 **Comparison to Persona Vectors:**
-- Similar effect sizes (d≈2-4 for personality traits)
+- **Much stronger** than typical personality vectors (d≈2-4)
 - Same mean-difference methodology
-- Comparable signal strength
+- **2-3× larger effect size** (d=9.172 vs typical d=2-4)
+- Positional windowing dramatically increases sample size and separation
 
 ## Context
 

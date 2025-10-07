@@ -1,7 +1,9 @@
 #!/usr/bin/env python
-"""Extract mean-difference vector with positional clipping.
-Generates clips at every sentence boundary to maximize training samples.
+"""Extract mean-difference vector with positional clipping at actual sentence boundaries.
+Generates clips at every sentence boundary (not paragraph breaks) to maximize training samples.
 Uses matched_lines windowing: from response start to clip position.
+
+Note: Paraphrasing operates at paragraph level, but extraction clips at sentence level.
 """
 import json
 import argparse
@@ -23,14 +25,29 @@ def _split_lines(text: str) -> List[str]:
     return text.split('\n')
 
 def extract_sentences(text: str) -> List[str]:
-    """Extract meaningful sentences (skip empty lines and special tokens)."""
-    sentences = []
-    for line in text.split('\n'):
-        stripped = line.strip()
-        if not stripped or stripped in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
-            continue
-        sentences.append(stripped)
-    return sentences
+    """Extract actual sentences (split on sentence boundaries: . ! ?).
+    This is different from paraphrasing which operates on paragraph/line boundaries.
+    """
+    import re
+
+    # Remove special tokens
+    text = text.replace('<think>', '').replace('</think>', '')
+    text = text.replace('<|im_start|>', '').replace('<|im_end|>', '')
+    text = text.strip()
+
+    # Split on sentence boundaries (. ! ? followed by space/newline)
+    # Use a simple split that keeps the sentence together with its punctuation
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    # Clean up and filter
+    result = []
+    for sent in sentences:
+        stripped = sent.strip()
+        # Skip empty or very short fragments
+        if stripped and len(stripped) > 5:
+            result.append(stripped)
+
+    return result
 
 def get_hidden_states(model, tokenizer, full_text: str, output_hidden_states: bool = True):
     with torch.no_grad():
@@ -65,34 +82,20 @@ def mean_activation_over_window(hidden_states, start_tok: int, end_tok: int, lay
 def build_windows_for_variant(tokenizer,
                               prompt_with_template: str,
                               on_policy_text: str,
-                              off_policy_text: str,
-                              last_edited_line_idx: int) -> Tuple[Tuple[int,int], Tuple[int,int]]:
+                              off_policy_text: str) -> Tuple[Tuple[int,int], Tuple[int,int]]:
     """Return absolute token windows (start,end) for on and off texts.
-       Uses matched_lines: average from response start up to end of clip position.
+       Uses matched_lines: average from response start to end of clipped text.
     """
-    # Compute prefix (completion up to last edited line, inclusive)
-    on_lines = _split_lines(on_policy_text)
-    off_lines = _split_lines(off_policy_text)
-
-    # Safety: bound index
-    last_idx = max(-1, last_edited_line_idx)
-    if last_idx >= 0:
-        on_prefix = '\n'.join(on_lines[: last_idx + 1])
-        off_prefix = '\n'.join(off_lines[: last_idx + 1])
-    else:
-        on_prefix = ''
-        off_prefix = ''
-
     # Token counts
     prompt_tok_len = _token_len(tokenizer, prompt_with_template)
-    on_prefix_tok_len = _token_len(tokenizer, prompt_with_template + on_prefix)
-    off_prefix_tok_len = _token_len(tokenizer, prompt_with_template + off_prefix)
+    on_clip_tok_len = _token_len(tokenizer, prompt_with_template + on_policy_text)
+    off_clip_tok_len = _token_len(tokenizer, prompt_with_template + off_policy_text)
 
-    # From response start to end of prefix
+    # From response start to end of clip
     on_start = prompt_tok_len
+    on_end = on_clip_tok_len
     off_start = prompt_tok_len
-    on_end = on_prefix_tok_len
-    off_end = off_prefix_tok_len
+    off_end = off_clip_tok_len
 
     return (on_start, on_end), (off_start, off_end)
 
@@ -122,10 +125,9 @@ def main():
     ap.add_argument('--input', type=Path, default='data/off_policy.json')
     ap.add_argument('--output', type=Path, default='artifacts/vector.json')
     ap.add_argument('--model', default='Qwen/Qwen3-4B')
+    ap.add_argument('--max-sentences', type=int, default=None,
+                   help='Limit positional windowing to first N sentences (default: use all)')
     ap.add_argument('--layers', nargs='+', type=int, default=None)
-    ap.add_argument('--train-frac', type=float, default=0.7)
-    ap.add_argument('--val-frac', type=float, default=0.15)
-    ap.add_argument('--seed', type=int, default=123)
     args = ap.parse_args()
 
     # Load model
@@ -145,30 +147,17 @@ def main():
     with open(args.input) as f:
         dataset = json.load(f)
 
-    # Split by prompt index
-    rng = np.random.default_rng(args.seed)
-    idxs = np.arange(len(dataset))
-    rng.shuffle(idxs)
-    n_train = int(len(idxs) * args.train_frac)
-    n_val = int(len(idxs) * args.val_frac)
-    train_idx = set(idxs[:n_train])
-    val_idx = set(idxs[n_train:n_train+n_val])
-    test_idx = set(idxs[n_train+n_val:])
-
-    def which_split(i):
-        if i in train_idx: return 'train'
-        if i in val_idx: return 'val'
-        return 'test'
-
     # Storage
-    acts = {split: {'on': {l: [] for l in args.layers}, 'off': {l: [] for l in args.layers}} for split in ('train','val','test')}
+    acts = {
+        'on': {l: [] for l in args.layers},
+        'off': {l: [] for l in args.layers},
+    }
 
     print("Collecting activations with matched_lines windowing")
     print("Clipping at every sentence boundary...")
 
     total_clips = 0
     for i, example in enumerate(dataset):
-        split = which_split(i)
         prompt_with_template = example['prompt_with_template']
         on_rollouts = example['on_policy']
 
@@ -182,44 +171,28 @@ def main():
             off_sentences = extract_sentences(off_full)
             max_sentences = min(len(on_sentences), len(off_sentences))
 
+            # Optionally limit to first N sentences
+            if args.max_sentences is not None:
+                max_sentences = min(max_sentences, args.max_sentences)
+
             # Clip at every sentence boundary
+            on_has_think = '<think>' in on_full
+            off_has_think = '<think>' in off_full
+
             for clip_pos in range(1, max_sentences + 1):
-                # Find line index of the clip_pos-th sentence
-                on_lines = _split_lines(on_full)
-                off_lines = _split_lines(off_full)
+                # Build clips from first N sentences
+                # Join them with spaces (since sentence extractor already stripped formatting)
+                on_clip = ' '.join(on_sentences[:clip_pos])
+                off_clip = ' '.join(off_sentences[:clip_pos])
 
-                # Count sentences and track line indices
-                on_sent_count = 0
-                off_sent_count = 0
-                on_last_line = -1
-                off_last_line = -1
-
-                for line_idx, line in enumerate(on_lines):
-                    stripped = line.strip()
-                    if stripped and stripped not in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
-                        on_sent_count += 1
-                        if on_sent_count <= clip_pos:
-                            on_last_line = line_idx
-                        else:
-                            break
-
-                for line_idx, line in enumerate(off_lines):
-                    stripped = line.strip()
-                    if stripped and stripped not in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
-                        off_sent_count += 1
-                        if off_sent_count <= clip_pos:
-                            off_last_line = line_idx
-                        else:
-                            break
-
-                # Build clipped text
-                on_clip = '\n'.join(on_lines[:on_last_line + 1]) if on_last_line >= 0 else ''
-                off_clip = '\n'.join(off_lines[:off_last_line + 1]) if off_last_line >= 0 else ''
+                if on_has_think:
+                    on_clip = '<think>\n' + on_clip
+                if off_has_think:
+                    off_clip = '<think>\n' + off_clip
 
                 # Compute windows
                 (on_start, on_end), (off_start, off_end) = build_windows_for_variant(
-                    tokenizer, prompt_with_template, on_clip, off_clip,
-                    max(on_last_line, off_last_line)
+                    tokenizer, prompt_with_template, on_clip, off_clip
                 )
 
                 # Full texts with prompt
@@ -232,56 +205,51 @@ def main():
 
                 # Collect layer means
                 for l in args.layers:
-                    acts[split]['on'][l].append(mean_activation_over_window(on_hs, on_start, on_end, l))
-                    acts[split]['off'][l].append(mean_activation_over_window(off_hs, off_start, off_end, l))
+                    acts['on'][l].append(mean_activation_over_window(on_hs, on_start, on_end, l))
+                    acts['off'][l].append(mean_activation_over_window(off_hs, off_start, off_end, l))
 
                 total_clips += 1
 
     print(f"Generated {total_clips} total clips from {sum(len(ex['off_policy']) for ex in dataset)} variants")
 
-    # Compute vectors from TRAIN only
+    # Compute vectors from all data
     vector = {}
     for l in args.layers:
-        on_mean = torch.stack(acts['train']['on'][l]).mean(dim=0)
-        off_mean = torch.stack(acts['train']['off'][l]).mean(dim=0)
+        on_mean = torch.stack(acts['on'][l]).mean(dim=0)
+        off_mean = torch.stack(acts['off'][l]).mean(dim=0)
         vector[l] = on_mean - off_mean
 
-    # Evaluate per split
-    print("\nEvaluation per split (projection onto unit vector):")
-    header = "Split  | Layer | d (Cohen) | Bacc |  AUC "
+    # Evaluate all layers
+    print("\nEvaluation (projection onto unit vector):")
+    header = "Layer | d (Cohen) | Bacc |  AUC "
     print(header)
     print("-"*len(header))
 
-    best = {'layer': None, 'd': -1.0}
     results = []
 
-    for split in ('train','val','test'):
-        for l in args.layers:
-            v = vector[l] / (torch.norm(vector[l]) + 1e-8)
-            on_proj = [float(v @ a) for a in acts[split]['on'][l]]
-            off_proj = [float(v @ a) for a in acts[split]['off'][l]]
-            d = cohens_d(on_proj, off_proj)
-            thr, bacc, auc = eval_metrics(on_proj, off_proj)
-            results.append((split, l, d, bacc, auc, thr))
-            print(f"{split:5} | {l:5d} | {d:9.3f} | {bacc:4.2f} | {auc if auc is not None else float('nan'):5.3f}")
+    for l in args.layers:
+        v = vector[l] / (torch.norm(vector[l]) + 1e-8)
+        on_proj = [float(v @ a) for a in acts['on'][l]]
+        off_proj = [float(v @ a) for a in acts['off'][l]]
+        d = cohens_d(on_proj, off_proj)
+        thr, bacc, auc = eval_metrics(on_proj, off_proj)
+        results.append((l, d, bacc, auc, thr))
+        print(f"{l:5d} | {d:9.3f} | {bacc:4.2f} | {auc if auc is not None else float('nan'):5.3f}")
 
-            if split == 'val' and d > best['d']:
-                best.update({'layer': l, 'd': d})
-
-    print(f"\nBest layer on VAL: {best['layer']} (d={best['d']:.3f})")
-
-    # Save only best layer vector
+    # Save all layer vectors
+    total_samples = len(acts['on'][args.layers[0]])
     out = {
-        'layer': best['layer'],
-        'vector': vector[best['layer']].cpu().numpy().tolist(),
-        'layers_considered': args.layers,
-        'total_training_samples': len(acts['train']['on'][best['layer']])
+        'vectors': {
+            str(l): vector[l].cpu().numpy().tolist()
+            for l in args.layers
+        },
+        'total_samples': total_samples
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, 'w') as f:
         json.dump(out, f)
-    print(f"Saved best-layer vector JSON to {args.output}")
-    print(f"Training samples: {out['total_training_samples']}")
+    print(f"\nSaved {len(args.layers)} layer vectors to {args.output}")
+    print(f"Total samples (per policy type): {total_samples}")
 
 if __name__ == '__main__':
     main()
