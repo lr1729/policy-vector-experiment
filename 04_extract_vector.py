@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-"""Extract mean-difference vector with windowed options and holdout eval."""
+"""Extract mean-difference vector with positional clipping.
+Generates clips at every sentence boundary to maximize training samples.
+Uses matched_lines windowing: from response start to clip position.
+"""
 import json
 import argparse
 from pathlib import Path
@@ -18,6 +21,16 @@ def _token_len(tokenizer, text: str) -> int:
 
 def _split_lines(text: str) -> List[str]:
     return text.split('\n')
+
+def extract_sentences(text: str) -> List[str]:
+    """Extract meaningful sentences (skip empty lines and special tokens)."""
+    sentences = []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if not stripped or stripped in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
+            continue
+        sentences.append(stripped)
+    return sentences
 
 def get_hidden_states(model, tokenizer, full_text: str, output_hidden_states: bool = True):
     with torch.no_grad():
@@ -53,15 +66,11 @@ def build_windows_for_variant(tokenizer,
                               prompt_with_template: str,
                               on_policy_text: str,
                               off_policy_text: str,
-                              last_edited_line_idx: int,
-                              window_mode: str,
-                              k_tokens: int) -> Tuple[Tuple[int,int], Tuple[int,int]]:
-    """Return absolute token windows (start,end) for on and off full_texts.
-       Strategy:
-         - matched_lines: average from response start up to end of last edited line
-         - k_after_edit: average over the first K tokens after the last edited line boundary
+                              last_edited_line_idx: int) -> Tuple[Tuple[int,int], Tuple[int,int]]:
+    """Return absolute token windows (start,end) for on and off texts.
+       Uses matched_lines: average from response start up to end of clip position.
     """
-    # compute prefix (completion up to last edited line, inclusive)
+    # Compute prefix (completion up to last edited line, inclusive)
     on_lines = _split_lines(on_policy_text)
     off_lines = _split_lines(off_policy_text)
 
@@ -78,23 +87,12 @@ def build_windows_for_variant(tokenizer,
     prompt_tok_len = _token_len(tokenizer, prompt_with_template)
     on_prefix_tok_len = _token_len(tokenizer, prompt_with_template + on_prefix)
     off_prefix_tok_len = _token_len(tokenizer, prompt_with_template + off_prefix)
-    on_full_tok_len  = _token_len(tokenizer, prompt_with_template + on_policy_text)
-    off_full_tok_len = _token_len(tokenizer, prompt_with_template + off_policy_text)
 
-    if window_mode == 'matched_lines':
-        # from response start to end of prefix
-        on_start = prompt_tok_len
-        off_start = prompt_tok_len
-        on_end = on_prefix_tok_len
-        off_end = off_prefix_tok_len
-    elif window_mode == 'k_after_edit':
-        # first K tokens after the boundary, independent for each condition
-        on_start = on_prefix_tok_len
-        off_start = off_prefix_tok_len
-        on_end = min(on_full_tok_len, on_start + k_tokens)
-        off_end = min(off_full_tok_len, off_start + k_tokens)
-    else:
-        raise ValueError("Unknown window_mode")
+    # From response start to end of prefix
+    on_start = prompt_tok_len
+    off_start = prompt_tok_len
+    on_end = on_prefix_tok_len
+    off_end = off_prefix_tok_len
 
     return (on_start, on_end), (off_start, off_end)
 
@@ -122,10 +120,8 @@ def eval_metrics(on_proj, off_proj):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--input', type=Path, default='data/off_policy.json')
-    ap.add_argument('--output', type=Path, default='artifacts/vector.pt')
+    ap.add_argument('--output', type=Path, default='artifacts/vector.json')
     ap.add_argument('--model', default='Qwen/Qwen3-4B')
-    ap.add_argument('--window', choices=['matched_lines', 'k_after_edit'], default='matched_lines')
-    ap.add_argument('--k-tokens', type=int, default=24)
     ap.add_argument('--layers', nargs='+', type=int, default=None)
     ap.add_argument('--train-frac', type=float, default=0.7)
     ap.add_argument('--val-frac', type=float, default=0.15)
@@ -167,42 +163,81 @@ def main():
     # Storage
     acts = {split: {'on': {l: [] for l in args.layers}, 'off': {l: [] for l in args.layers}} for split in ('train','val','test')}
 
-    print("Collecting activations with window:", args.window, " K=", args.k_tokens)
+    print("Collecting activations with matched_lines windowing")
+    print("Clipping at every sentence boundary...")
+
+    total_clips = 0
     for i, example in enumerate(dataset):
         split = which_split(i)
         prompt_with_template = example['prompt_with_template']
-
-        # build on-policy lookup
         on_rollouts = example['on_policy']
 
-        # Precompute hidden states for each on-policy rollout full text (only once per layer usage)
-        # We'll compute windows per off-policy variant
         for variant in example['off_policy']:
             src = int(variant['source_rollout_idx'])
-            last_idx = int(variant.get('last_edited_line_idx', -1))
-
-            # texts (full) for building windows
             on_full = on_rollouts[src]
-            # pick which off text to use (clipped or full?), here we always use full and then window it
-            off_full = variant.get('text_full', variant.get('text_clipped', ''))
+            off_full = variant.get('text', on_full)  # New format uses 'text'
 
-            # windows
-            (on_start, on_end), (off_start, off_end) = build_windows_for_variant(
-                tokenizer, prompt_with_template, on_full, off_full, last_idx, args.window, args.k_tokens
-            )
+            # Extract sentences for clipping
+            on_sentences = extract_sentences(on_full)
+            off_sentences = extract_sentences(off_full)
+            max_sentences = min(len(on_sentences), len(off_sentences))
 
-            # Full texts
-            on_full_text = prompt_with_template + on_full
-            off_full_text = prompt_with_template + off_full
+            # Clip at every sentence boundary
+            for clip_pos in range(1, max_sentences + 1):
+                # Find line index of the clip_pos-th sentence
+                on_lines = _split_lines(on_full)
+                off_lines = _split_lines(off_full)
 
-            # Hidden states and sequence lengths
-            on_hs, _ = get_hidden_states(model, tokenizer, on_full_text)
-            off_hs, _ = get_hidden_states(model, tokenizer, off_full_text)
+                # Count sentences and track line indices
+                on_sent_count = 0
+                off_sent_count = 0
+                on_last_line = -1
+                off_last_line = -1
 
-            # Collect layer means
-            for l in args.layers:
-                acts[split]['on'][l].append(mean_activation_over_window(on_hs, on_start, on_end, l))
-                acts[split]['off'][l].append(mean_activation_over_window(off_hs, off_start, off_end, l))
+                for line_idx, line in enumerate(on_lines):
+                    stripped = line.strip()
+                    if stripped and stripped not in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
+                        on_sent_count += 1
+                        if on_sent_count <= clip_pos:
+                            on_last_line = line_idx
+                        else:
+                            break
+
+                for line_idx, line in enumerate(off_lines):
+                    stripped = line.strip()
+                    if stripped and stripped not in ['<think>', '</think>', '<|im_start|>', '<|im_end|>']:
+                        off_sent_count += 1
+                        if off_sent_count <= clip_pos:
+                            off_last_line = line_idx
+                        else:
+                            break
+
+                # Build clipped text
+                on_clip = '\n'.join(on_lines[:on_last_line + 1]) if on_last_line >= 0 else ''
+                off_clip = '\n'.join(off_lines[:off_last_line + 1]) if off_last_line >= 0 else ''
+
+                # Compute windows
+                (on_start, on_end), (off_start, off_end) = build_windows_for_variant(
+                    tokenizer, prompt_with_template, on_clip, off_clip,
+                    max(on_last_line, off_last_line)
+                )
+
+                # Full texts with prompt
+                on_full_text = prompt_with_template + on_clip
+                off_full_text = prompt_with_template + off_clip
+
+                # Hidden states
+                on_hs, _ = get_hidden_states(model, tokenizer, on_full_text)
+                off_hs, _ = get_hidden_states(model, tokenizer, off_full_text)
+
+                # Collect layer means
+                for l in args.layers:
+                    acts[split]['on'][l].append(mean_activation_over_window(on_hs, on_start, on_end, l))
+                    acts[split]['off'][l].append(mean_activation_over_window(off_hs, off_start, off_end, l))
+
+                total_clips += 1
+
+    print(f"Generated {total_clips} total clips from {sum(len(ex['off_policy']) for ex in dataset)} variants")
 
     # Compute vectors from TRAIN only
     vector = {}
@@ -239,14 +274,14 @@ def main():
     out = {
         'layer': best['layer'],
         'vector': vector[best['layer']].cpu().numpy().tolist(),
-        'window': args.window,
-        'k_tokens': args.k_tokens,
-        'layers_considered': args.layers
+        'layers_considered': args.layers,
+        'total_training_samples': len(acts['train']['on'][best['layer']])
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, 'w') as f:
         json.dump(out, f)
     print(f"Saved best-layer vector JSON to {args.output}")
+    print(f"Training samples: {out['total_training_samples']}")
 
 if __name__ == '__main__':
     main()

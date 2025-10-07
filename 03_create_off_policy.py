@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""Create off-policy variants by replacing sentences with paraphrases.
-Adds metadata needed for matched-window and K-after-edit extraction.
+"""Create off-policy variants by paraphrasing ALL sentences (100% paraphrasing).
+Each variant uses random model mixing for diverse surface forms with identical semantics.
+Windowing/clipping is handled in the extraction script (04_extract_vector.py).
 """
 import json
 import argparse
@@ -34,38 +35,35 @@ def extract_sentences_with_positions(raw_completion: str) -> List[Tuple[int, str
         sentences.append((line_idx, stripped))
     return sentences
 
-def apply_paraphrases_and_clip(raw_completion: str,
-                               sentences_with_pos: List[Tuple[int, str]],
-                               positions_to_edit: List[int],
-                               paraphrase_db: Dict[str, list]):
-    """Apply paraphrases to specific sentence positions and clip at last edit.
+def apply_paraphrases_full(raw_completion: str,
+                           sentences_with_pos: List[Tuple[int, str]],
+                           positions_to_edit: List[int],
+                           paraphrase_db: Dict[str, list]):
+    """Apply paraphrases to ALL specified sentence positions (100% paraphrasing).
+    Each sentence gets a randomly selected paraphrase from available models.
+
     Returns:
-        clipped_result (str): completion up to last edited line (inclusive).
-        full_result (str): full completion with paraphrases.
-        last_edited_line_idx (int)
+        paraphrased_text (str): full completion with all sentences paraphrased
         chosen_info (list[dict]): [{"line_idx": int, "orig": str, "paraphrase": str, "model": str}]
     """
     lines = raw_completion.split('\n')
     line_replacements = {}
-    last_edited_line_idx = -1
     chosen_info = []
 
-    for sent_idx in sorted(positions_to_edit):
+    for sent_idx in positions_to_edit:
         if sent_idx >= len(sentences_with_pos):
             continue
         line_idx, original_sentence = sentences_with_pos[sent_idx]
 
-        # Pick random paraphrase
+        # Pick random paraphrase (random model mixing)
         options = paraphrase_db.get(original_sentence, [])
         if not options:
-            # Shouldn't happen if caller checked
             continue
         chosen = random.choice(options)
         paraphrase = chosen.get('text', '')
         model = chosen.get('model', 'unknown')
 
         line_replacements[line_idx] = paraphrase
-        last_edited_line_idx = max(last_edited_line_idx, line_idx)
         chosen_info.append({
             "line_idx": line_idx,
             "orig": original_sentence,
@@ -74,26 +72,18 @@ def apply_paraphrases_and_clip(raw_completion: str,
         })
 
     # Build full result with replacements
-    full_lines = []
+    result_lines = []
     for line_idx, line in enumerate(lines):
-        full_lines.append(line_replacements.get(line_idx, line))
+        result_lines.append(line_replacements.get(line_idx, line))
 
-    # Clip at last edited line (inclusive)
-    if last_edited_line_idx != -1:
-        clipped_lines = full_lines[: last_edited_line_idx + 1]
-    else:
-        clipped_lines = full_lines
-
-    full_result = '\n'.join(full_lines)
-    clipped_result = '\n'.join(clipped_lines)
-    return clipped_result, full_result, last_edited_line_idx, chosen_info
+    paraphrased_text = '\n'.join(result_lines)
+    return paraphrased_text, chosen_info
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--on-policy', type=Path, default='data/on_policy.json')
     ap.add_argument('--paraphrases', type=Path, default='data/sentence_paraphrases.json')
     ap.add_argument('--output', type=Path, default='data/off_policy.json')
-    ap.add_argument('--variants-per-rollout', type=int, default=3)
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
 
@@ -132,25 +122,17 @@ def main():
             if num_paraphraseable == 0:
                 continue
 
-            for _ in range(args.variants_per_rollout):
-                num_to_edit = random.randint(1, num_paraphraseable)
-                chosen_positions = sorted(random.sample(paraphraseable_positions, num_to_edit))
+            # Paraphrase ALL paraphraseable sentences (100% paraphrasing)
+            # Uses random model mixing for diversity
+            paraphrased_text, chosen_info = apply_paraphrases_full(
+                raw_completion, sentences_with_pos, paraphraseable_positions, paraphrase_db
+            )
 
-                clipped, full, last_idx, chosen_info = apply_paraphrases_and_clip(
-                    raw_completion, sentences_with_pos, chosen_positions, paraphrase_db
-                )
-
-                off_policy_variants.append({
-                    'text_clipped': clipped,
-                    'text_full': full,
-                    'source_rollout_idx': rollout_idx,
-                    'num_edits': num_to_edit,
-                    'total_paraphraseable': num_paraphraseable,
-                    'last_edited_line_idx': last_idx,
-                    'edited_positions': chosen_positions,
-                    'replacements': chosen_info
-                })
-                total_off += 1
+            off_policy_variants.append({
+                'text': paraphrased_text,
+                'source_rollout_idx': rollout_idx
+            })
+            total_off += 1
 
         dataset.append({
             'prompt_with_template': prompt_with_template,
@@ -162,17 +144,9 @@ def main():
     with open(args.output, 'w') as f:
         json.dump(dataset, f, indent=2)
 
-    # Stats
-    edit_counts = {}
-    for ex in dataset:
-        for v in ex['off_policy']:
-            k = v['num_edits']
-            edit_counts[k] = edit_counts.get(k, 0) + 1
-
     print(f"Created dataset: {len(dataset)} prompts")
-    print(f"  {total_on} on-policy rollouts")
-    print(f"  {total_off} off-policy variants")
-    print("  Edit distribution:", dict(sorted(edit_counts.items())))
+    print(f"  On-policy: {total_on} rollouts")
+    print(f"  Off-policy: {total_off} variants (100% paraphrased)")
     print(f"Output: {args.output}")
     
 if __name__ == '__main__':

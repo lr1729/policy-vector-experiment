@@ -47,8 +47,23 @@ def generate_reasoning_batch(model, tokenizer, prompt, num_samples=1, max_tokens
     input_len = inputs['input_ids'].shape[1]
 
     for output in outputs:
-        # Decode WITHOUT skipping special tokens to preserve exact format
-        raw_completion = tokenizer.decode(output[input_len:], skip_special_tokens=False)
+        # Get completion tokens (after prompt)
+        completion_ids = output[input_len:]
+
+        # Find first EOS token (if any) and truncate there
+        # This removes padding EOS but keeps all other special tokens
+        eos_positions = (completion_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)[0]
+        if len(eos_positions) > 0:
+            # Keep everything up to and including first EOS
+            first_eos = eos_positions[0].item()
+            completion_ids = completion_ids[:first_eos + 1]
+
+        # Decode with special tokens preserved (keeps <think>, </think>, etc.)
+        raw_completion = tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+        # Strip <|im_end|> token from end (it's an EOS marker, not semantic content)
+        raw_completion = raw_completion.rstrip('<|im_end|>').rstrip()
+
         rollouts.append(raw_completion)
 
     return prompt_with_template, rollouts
